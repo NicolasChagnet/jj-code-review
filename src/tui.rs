@@ -940,20 +940,50 @@ impl App {
                             .collect();
                         text.push('…');
                     }
+                    // Selection is signalled by weight as well as tint: a
+                    // blended background alone is too subtle to read on some
+                    // themes, and the tint can vanish against a light one.
+                    let emphasis = if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    };
                     let spans = vec![
-                        Span::styled(format!("{mark} "), base.fg(self.theme.comment_fg)),
+                        Span::styled(
+                            format!("{mark} "),
+                            base.fg(self.theme.comment_fg).add_modifier(emphasis),
+                        ),
                         Span::styled(
                             format!("{:>4} ", num.unwrap_or(0)),
-                            base.fg(self.theme.dim_fg),
+                            base.fg(self.theme.dim_fg).add_modifier(emphasis),
                         ),
-                        Span::styled(format!("{sign} "), base.fg(sign_fg)),
-                        Span::styled(text, text_style),
+                        Span::styled(
+                            format!("{sign} "),
+                            base.fg(if selected {
+                                self.theme.accent_fg
+                            } else {
+                                sign_fg
+                            })
+                            .add_modifier(emphasis),
+                        ),
+                        Span::styled(text, text_style.add_modifier(emphasis)),
                     ];
-                    let mut rendered = Line::from(spans);
+
+                    // The cursor row and the selection must not disagree about
+                    // the band: whoever wins owns the padding too, otherwise the
+                    // row ends in a mismatched tail.
+                    let row_bg = if selected {
+                        bg
+                    } else if idx == cursor {
+                        self.theme.cursor_bg
+                    } else {
+                        bg
+                    };
                     if idx == cursor {
-                        rendered = pad_line(rendered, width, self.theme.cursor_bg);
                         cursor_line = out.len();
-                    } else if let Some(bg) = bg {
+                    }
+                    let mut rendered = Line::from(spans);
+                    if let Some(bg) = row_bg {
                         rendered = pad_line(rendered, width, Some(bg));
                     }
                     out.push(rendered);
@@ -1299,11 +1329,22 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
+/// Pads a row to `width` so its background covers the whole line.
+///
+/// The padding inherits the row's existing modifiers, so a padded row keeps
+/// whatever emphasis its spans carry (bold for a selection).
 fn pad_line(line: Line<'static>, width: usize, bg: Option<Color>) -> Line<'static> {
     let used: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
     let mut spans = line.spans;
     if used < width {
-        spans.push(Span::styled(" ".repeat(width - used), bg_style(bg)));
+        let modifiers = spans
+            .last()
+            .map(|s| s.style.add_modifier)
+            .unwrap_or_default();
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            bg_style(bg).add_modifier(modifiers),
+        ));
     }
     Line::from(spans)
 }
@@ -1880,6 +1921,50 @@ diff --git a/a.txt b/a.txt
         let raw = "diff --git a/x b/x\n";
         let a = app_of(raw);
         assert!(a.empty_state.is_some());
+    }
+
+    #[test]
+    fn selection_marks_the_text_bold_and_keeps_one_background() {
+        let mut a = app();
+        a.handle_key(key(KeyCode::Char('v')));
+        a.handle_key(key(KeyCode::Char('j')));
+        assert!(a.selection().is_some());
+        let (lines, _) = a.diff_lines(60);
+        let (from, to) = a.selection().unwrap();
+        let rows: Vec<(usize, &Line)> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.spans.iter().any(|s| s.style.bg == a.theme.sel_bg))
+            .collect();
+        assert!(!rows.is_empty(), "selected rows carry the selection bg");
+        for (_, line) in rows {
+            let bgs: Vec<_> = line.spans.iter().map(|s| s.style.bg).collect();
+            let first = bgs.first().copied().unwrap();
+            assert!(
+                bgs.iter().all(|b| *b == first),
+                "one background per selected row, got {bgs:?}"
+            );
+            assert!(
+                line.spans
+                    .iter()
+                    .all(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+                "every span of a selected row is emphasised"
+            );
+        }
+        let _ = (from, to);
+    }
+
+    #[test]
+    fn unselected_rows_are_not_emphasised() {
+        let a = app();
+        let (lines, _) = a.diff_lines(60);
+        assert!(
+            !lines.iter().any(|l| l
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD))),
+            "bold is reserved for the selection"
+        );
     }
 
     #[test]

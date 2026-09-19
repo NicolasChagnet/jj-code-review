@@ -16,15 +16,22 @@ use crate::diff::{DiffLine, LineKind};
 /// Which side of the diff an annotation's line numbers refer to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Side {
+    /// The pre-change content, for ranges that no longer exist.
     Old,
+    /// The resulting content: every ordinary line annotation.
     New,
+    /// The whole file, with no line numbers at all.
+    File,
 }
 
 impl Side {
-    pub fn as_str(self) -> &'static str {
+    /// Serialized form. `None` for whole-file annotations, which carry no
+    /// line numbers because they do not point at any particular line.
+    pub fn as_str(self) -> Option<&'static str> {
         match self {
-            Side::Old => "old",
-            Side::New => "new",
+            Side::Old => Some("old"),
+            Side::New => Some("new"),
+            Side::File => None,
         }
     }
 }
@@ -82,7 +89,9 @@ pub struct Annotation {
     pub anchor_row: usize,
     /// Number of diff rows from `anchor_row` covered by the range.
     pub row_count: usize,
-    /// Line span on the reported [`Side`], 1-based and inclusive.
+    /// Line span on the reported [`Side`], 1-based and inclusive. `None` both
+    /// for whole-file annotations and, in `start`/`end`, whenever the side has
+    /// no number to report.
     pub side: Side,
     pub start: u32,
     pub end: u32,
@@ -98,6 +107,11 @@ impl Annotation {
         self.body.kind()
     }
 
+    /// True when this annotation comments on the file as a whole.
+    pub fn is_file_scope(&self) -> bool {
+        self.side == Side::File
+    }
+
     /// Content-row index one past the last row of the anchored range.
     pub fn max_row(&self) -> usize {
         self.anchor_row + self.row_count.saturating_sub(1)
@@ -105,6 +119,9 @@ impl Annotation {
 
     /// True when this annotation covers the given content row and line.
     pub fn covers(&self, row: usize, line: &DiffLine) -> bool {
+        if self.is_file_scope() {
+            return false;
+        }
         if row < self.anchor_row || row > self.max_row() {
             return false;
         }
@@ -120,11 +137,12 @@ impl Annotation {
         }
     }
 
-    /// Human label like `L12-14` or `removed L7`.
+    /// Human label like `L12-14`, `removed L7` or `whole file`.
     pub fn label(&self) -> String {
         let prefix = match self.side {
             Side::New => String::from("L"),
             Side::Old => String::from("removed L"),
+            Side::File => return String::from("whole file"),
         };
         if self.start == self.end {
             format!("{prefix}{}", self.start)
@@ -178,7 +196,8 @@ pub fn anchor(
     };
     let (start, end) = match side {
         Side::Old => old.ok_or(AnchorError::Empty)?,
-        Side::New => new.ok_or(AnchorError::Empty)?,
+        // `anchor` never produces a file-scope annotation; use `file_anchor`.
+        Side::New | Side::File => new.ok_or(AnchorError::Empty)?,
     };
 
     if side == Side::Old && matches!(body, Body::Edit(_) | Body::Delete) {
@@ -205,6 +224,27 @@ fn span(current: Option<(u32, u32)>, n: u32) -> (u32, u32) {
     }
 }
 
+/// A whole-file annotation: no line numbers, no row range.
+///
+/// Only comments can be file-scoped; there is no such thing as editing or
+/// deleting an entire file from a review.
+pub fn file_anchor(file: usize, body: Body) -> Result<Annotation, AnchorError> {
+    if !matches!(body, Body::Comment(_)) {
+        return Err(AnchorError::OldSide);
+    }
+    Ok(Annotation {
+        file,
+        anchor_row: 0,
+        row_count: 0,
+        side: Side::File,
+        start: 0,
+        end: 0,
+        old_span: None,
+        new_span: None,
+        body,
+    })
+}
+
 /// New-side content of an annotation's range, for prefilling an edit popup.
 pub fn new_side_content(rows: &[DiffLine], from: usize, to: usize) -> String {
     let mut out: Vec<&str> = Vec::new();
@@ -219,7 +259,12 @@ pub fn new_side_content(rows: &[DiffLine], from: usize, to: usize) -> String {
 /// Sorts annotations into the deterministic submit order: file order, then
 /// start line, then kind (comment, edit, delete).
 pub fn submit_order(annotations: &mut [Annotation]) {
-    annotations.sort_by_key(|a| (a.file, a.start, a.end, a.kind().rank()));
+    // Whole-file comments sort before any line-anchored entry of their file;
+    // they are the least specific, so they read as a preamble.
+    annotations.sort_by_key(|a| {
+        let scope = u8::from(!a.is_file_scope());
+        (a.file, scope, a.start, a.end, a.kind().rank())
+    });
 }
 
 /// All files that carry at least one annotation, in diff order.

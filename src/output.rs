@@ -65,10 +65,19 @@ fn header_line(file: &diff::FileDiff) -> String {
     }
 }
 
-/// One annotation, indented two spaces.
+/// One annotation, indented two spaces. A whole-file comment reads
+/// `whole file:` rather than carrying line numbers it does not have.
 fn entry(annotation: &model::Annotation) -> String {
     let label = annotation.label();
     match &annotation.body {
+        model::Body::Comment(text) if annotation.is_file_scope() => {
+            let lines = trimmed_lines(text);
+            let mut out = format!("  whole file: {}", lines.first().copied().unwrap_or(""));
+            for line in &lines[1..] {
+                out.push_str(&format!("\n    | {line}"));
+            }
+            out
+        }
         model::Body::Comment(text) => {
             let lines = trimmed_lines(text);
             let mut out = format!("  {label}: {}", lines.first().copied().unwrap_or(""));
@@ -116,14 +125,22 @@ struct JsonReport<'a> {
 struct JsonFile<'a> {
     path: &'a str,
     old_path: Option<&'a str>,
+    /// Comments on the file as a whole; these carry no line numbers.
+    file_comments: Vec<JsonFileComment<'a>>,
     comments: Vec<JsonComment<'a>>,
     edits: Vec<JsonEdit<'a>>,
     deletions: Vec<JsonDeletion>,
 }
 
 #[derive(Serialize)]
+struct JsonFileComment<'a> {
+    text: &'a str,
+}
+
+#[derive(Serialize)]
 struct JsonComment<'a> {
-    side: &'a str,
+    /// `null` never appears here: whole-file comments use `file_comments`.
+    side: Option<&'a str>,
     start: u32,
     end: u32,
     text: &'a str,
@@ -131,7 +148,7 @@ struct JsonComment<'a> {
 
 #[derive(Serialize)]
 struct JsonEdit<'a> {
-    side: &'a str,
+    side: Option<&'a str>,
     start: u32,
     end: u32,
     content: &'a str,
@@ -139,7 +156,7 @@ struct JsonEdit<'a> {
 
 #[derive(Serialize)]
 struct JsonDeletion {
-    side: &'static str,
+    side: Option<&'static str>,
     start: u32,
     end: u32,
 }
@@ -157,8 +174,12 @@ pub fn render_json(
         .map(|(index, file)| JsonFile {
             path: &file.path,
             old_path: file.old_path.as_deref(),
+            file_comments: collect(annotations, index, |a, body| match body {
+                model::Body::Comment(text) if a.is_file_scope() => Some(JsonFileComment { text }),
+                _ => None,
+            }),
             comments: collect(annotations, index, |a, body| match body {
-                model::Body::Comment(text) => Some(JsonComment {
+                model::Body::Comment(text) if !a.is_file_scope() => Some(JsonComment {
                     side: a.side.as_str(),
                     start: a.start,
                     end: a.end,
@@ -242,6 +263,11 @@ mod tests {
             binary: false,
             hunks: Vec::new(),
         }
+    }
+
+    /// Whole-file comment, as `jcr` builds them from the Files pane.
+    fn file_comment(file: usize, text: &str) -> Annotation {
+        crate::model::file_anchor(file, Body::Comment(text.into())).expect("comments are allowed")
     }
 
     fn annotation(file: usize, start: u32, end: u32, side: Side, body: Body) -> Annotation {
@@ -435,5 +461,50 @@ src/old.rs (renamed from src/older.rs)
         let json: Value =
             serde_json::from_str(&render_json(&target(), &files(), &mut annotations)).unwrap();
         assert!(json["files"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn json_puts_whole_file_comments_in_their_own_array() {
+        let mut annotations = vec![
+            file_comment(0, "this file needs tests"),
+            annotation(0, 12, 14, Side::New, Body::Comment("line comment".into())),
+        ];
+        let json: Value =
+            serde_json::from_str(&render_json(&target(), &files(), &mut annotations)).unwrap();
+        let file = &json["files"][0];
+        let file_comments = file["file_comments"].as_array().unwrap();
+        assert_eq!(file_comments.len(), 1);
+        assert_eq!(file_comments[0]["text"], "this file needs tests");
+        assert!(
+            file_comments[0].get("side").is_none() && file_comments[0].get("start").is_none(),
+            "file comments carry no line numbers"
+        );
+        assert_eq!(file["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(file["comments"][0]["side"], "new");
+    }
+
+    #[test]
+    fn plain_text_renders_a_whole_file_comment_without_line_numbers() {
+        let mut annotations = vec![
+            file_comment(0, "this file needs tests\nand a doc comment"),
+            annotation(0, 12, 14, Side::New, Body::Comment("line comment".into())),
+        ];
+        let text = render_text(&target(), &files(), &mut annotations);
+        assert!(
+            text.contains("  whole file: this file needs tests"),
+            "{text}"
+        );
+        assert!(text.contains("    | and a doc comment"), "{text}");
+        assert!(
+            text.find("whole file:").unwrap() < text.find("L12-14:").unwrap(),
+            "file comments lead their file section:\n{text}"
+        );
+    }
+
+    #[test]
+    fn whole_file_comments_are_the_only_file_scoped_kind() {
+        assert!(crate::model::file_anchor(0, Body::Comment("c".into())).is_ok());
+        assert!(crate::model::file_anchor(0, Body::Edit("e".into())).is_err());
+        assert!(crate::model::file_anchor(0, Body::Delete).is_err());
     }
 }

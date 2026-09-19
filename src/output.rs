@@ -67,9 +67,12 @@ fn header_line(file: &diff::FileDiff) -> String {
 
 /// One annotation, indented two spaces. A whole-file comment reads
 /// `whole file:` rather than carrying line numbers it does not have.
+///
+/// The quoted diff follows the entry, indented to match, so the report is
+/// readable without the diff in front of the reader.
 fn entry(annotation: &model::Annotation) -> String {
     let label = annotation.label();
-    match &annotation.body {
+    let mut out = match &annotation.body {
         model::Body::Comment(text) if annotation.is_file_scope() => {
             let lines = trimmed_lines(text);
             let mut out = format!("  whole file: {}", lines.first().copied().unwrap_or(""));
@@ -94,7 +97,11 @@ fn entry(annotation: &model::Annotation) -> String {
             out
         }
         model::Body::Delete => format!("  {label} delete"),
+    };
+    for line in annotation.snippet.lines() {
+        out.push_str(&format!("\n      {line}"));
     }
+    out
 }
 
 /// Content lines with trailing blanks dropped, so a text ending in a newline
@@ -129,7 +136,7 @@ struct JsonFile<'a> {
     file_comments: Vec<JsonFileComment<'a>>,
     comments: Vec<JsonComment<'a>>,
     edits: Vec<JsonEdit<'a>>,
-    deletions: Vec<JsonDeletion>,
+    deletions: Vec<JsonDeletion<'a>>,
 }
 
 #[derive(Serialize)]
@@ -144,6 +151,8 @@ struct JsonComment<'a> {
     start: u32,
     end: u32,
     text: &'a str,
+    /// The diff text the annotation points at, with the reviewed lines marked.
+    snippet: &'a str,
 }
 
 #[derive(Serialize)]
@@ -152,13 +161,15 @@ struct JsonEdit<'a> {
     start: u32,
     end: u32,
     content: &'a str,
+    snippet: &'a str,
 }
 
 #[derive(Serialize)]
-struct JsonDeletion {
+struct JsonDeletion<'a> {
     side: Option<&'static str>,
     start: u32,
     end: u32,
+    snippet: &'a str,
 }
 
 pub fn render_json(
@@ -184,6 +195,7 @@ pub fn render_json(
                     start: a.start,
                     end: a.end,
                     text,
+                    snippet: &a.snippet,
                 }),
                 _ => None,
             }),
@@ -193,6 +205,7 @@ pub fn render_json(
                     start: a.start,
                     end: a.end,
                     content,
+                    snippet: &a.snippet,
                 }),
                 _ => None,
             }),
@@ -201,6 +214,7 @@ pub fn render_json(
                     side: a.side.as_str(),
                     start: a.start,
                     end: a.end,
+                    snippet: &a.snippet,
                 }),
                 _ => None,
             }),
@@ -281,6 +295,7 @@ mod tests {
             end,
             old_span: Some(span),
             new_span: Some(span),
+            snippet: format!("@@ -{start},1 +{start},1 @@\n ctx\n-reviewed\n+reviewed"),
             body,
         }
     }
@@ -318,13 +333,29 @@ Review of 42d29bfe9fd6 \"initial setup\" (000000000000..42d29bfe9fd6)
 
 src/main.rs
   L12-14: This loop is O(n²); consider a HashMap.
+      @@ -12,1 +12,1 @@
+       ctx
+      -reviewed
+      +reviewed
   L30-31 edit:
     | line 1
     | line 2
+      @@ -30,1 +30,1 @@
+       ctx
+      -reviewed
+      +reviewed
   L33-35 delete
+      @@ -33,1 +33,1 @@
+       ctx
+      -reviewed
+      +reviewed
 
 src/old.rs (renamed from src/older.rs)
   removed L7: why was this removed?
+      @@ -7,1 +7,1 @@
+       ctx
+      -reviewed
+      +reviewed
 ";
         assert_eq!(render_text(&target(), &files(), &mut annotations), expected);
     }
@@ -397,7 +428,7 @@ src/old.rs (renamed from src/older.rs)
                 && out.contains("\nsrc/old.rs (renamed from src/older.rs)\n"),
             "{out}"
         );
-        assert!(out.ends_with("  removed L7 delete\n"), "{out}");
+        assert!(out.contains("  removed L7 delete\n"), "{out}");
     }
 
     #[test]
@@ -429,13 +460,14 @@ src/old.rs (renamed from src/older.rs)
         assert_eq!(files[0]["comments"][0]["end"], 14);
         assert_eq!(files[0]["comments"][0]["text"], "one");
         assert_eq!(files[0]["edits"][0]["content"], "line 1\nline 2");
-        assert_eq!(
-            files[0]["deletions"][0],
-            serde_json::json!({
-                "side": "new",
-                "start": 33,
-                "end": 35,
-            })
+        assert_eq!(files[0]["deletions"][0]["side"], "new");
+        assert_eq!(files[0]["deletions"][0]["start"], 33);
+        assert_eq!(files[0]["deletions"][0]["end"], 35);
+        assert!(
+            files[0]["deletions"][0]["snippet"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "deletions carry the quoted diff"
         );
 
         assert_eq!(files[1]["path"], "src/old.rs");

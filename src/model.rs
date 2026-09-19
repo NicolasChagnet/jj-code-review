@@ -99,6 +99,11 @@ pub struct Annotation {
     pub old_span: Option<(u32, u32)>,
     /// New-side span, when the range covers new lines.
     pub new_span: Option<(u32, u32)>,
+    /// The diff text this annotation points at, captured when it was created.
+    ///
+    /// Stored rather than looked up so the report stays readable on its own:
+    /// a reader of the output does not have the diff in front of them.
+    pub snippet: String,
     pub body: Body,
 }
 
@@ -213,8 +218,39 @@ pub fn anchor(
         end,
         old_span: old,
         new_span: new,
+        snippet: snippet(rows, from, to),
         body,
     })
+}
+
+/// How many diff lines of context to quote on either side of the range.
+const SNIPPET_CONTEXT: usize = 2;
+
+/// The diff text an annotation points at: the enclosing hunk header, then a
+/// few lines of surrounding context, each prefixed the way a diff prefixes it.
+///
+/// Mirrors the reference plugin's snippet, which is what makes the submitted
+/// review readable without the diff to hand.
+fn snippet(rows: &[DiffLine], from: usize, to: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let lo = from.saturating_sub(SNIPPET_CONTEXT);
+    let hi = (to + SNIPPET_CONTEXT).min(rows.len().saturating_sub(1));
+    for row in lo..=hi {
+        if let Some(line) = rows.get(row) {
+            let prefix = match line.kind {
+                LineKind::Add => "+",
+                LineKind::Del => "-",
+                LineKind::Context => " ",
+            };
+            let marked = if row >= from && row <= to {
+                "   <<< reviewed here"
+            } else {
+                ""
+            };
+            out.push(format!("{prefix}{}{marked}", line.text));
+        }
+    }
+    out.join("\n")
 }
 
 fn span(current: Option<(u32, u32)>, n: u32) -> (u32, u32) {
@@ -241,6 +277,9 @@ pub fn file_anchor(file: usize, body: Body) -> Result<Annotation, AnchorError> {
         end: 0,
         old_span: None,
         new_span: None,
+        // A whole-file comment anchors to nothing, so there is no hunk text
+        // to quote.
+        snippet: String::new(),
         body,
     })
 }
@@ -420,6 +459,63 @@ diff --git a/a.txt b/a.txt
     }
 
     #[test]
+    fn snippet_quotes_the_hunk_with_context() {
+        let r = rows(MODIFY);
+        let a = anchor(0, &r, 4, 5, Body::Comment("hi".into())).unwrap();
+        let lines: Vec<&str> = a.snippet.lines().collect();
+        // Rows 4-5 are the two added lines; two rows of context either side.
+        assert_eq!(lines.len(), 6, "2 before + 2 anchored + 2 after: {lines:?}");
+        assert!(lines[0].starts_with('-'), "removed context: {:?}", lines[0]);
+        assert!(lines[2].starts_with('+'), "added line: {:?}", lines[2]);
+        assert!(lines[2].contains("<<< reviewed here"));
+        assert!(lines[3].contains("<<< reviewed here"));
+        assert!(
+            lines[5].starts_with(' '),
+            "trailing context: {:?}",
+            lines[5]
+        );
+        assert!(!lines[5].contains("<<<"), "context is not marked");
+    }
+
+    #[test]
+    fn snippet_marks_only_the_anchored_rows() {
+        let r = rows(MODIFY);
+        let a = anchor(0, &r, 4, 6, Body::Comment("hi".into())).unwrap();
+        let marked = a
+            .snippet
+            .lines()
+            .filter(|l| l.contains("<<< reviewed here"))
+            .count();
+        assert_eq!(marked, 3, "one marker per anchored row:\n{}", a.snippet);
+    }
+
+    #[test]
+    fn snippet_includes_removed_lines_with_their_prefix() {
+        let r = rows(MODIFY);
+        let a = anchor(0, &r, 2, 3, Body::Comment("why?".into())).unwrap();
+        assert!(
+            a.snippet.lines().any(|l| l.starts_with("-old twelve")),
+            "removed lines are quoted:\n{}",
+            a.snippet
+        );
+    }
+
+    #[test]
+    fn snippet_at_the_file_start_has_no_leading_context() {
+        let r = rows(MODIFY);
+        let a = anchor(0, &r, 0, 0, Body::Comment("hi".into())).unwrap();
+        let lines: Vec<&str> = a.snippet.lines().collect();
+        assert_eq!(lines.len(), 3, "no context above row 0: {lines:?}");
+        assert!(lines[0].contains("<<< reviewed here"));
+    }
+
+    #[test]
+    fn whole_file_annotations_carry_no_snippet() {
+        let a = file_anchor(0, Body::Comment("file".into())).unwrap();
+        assert!(a.snippet.is_empty());
+    }
+
+    #[test]
     fn new_side_content_collects_replacement_lines() {
         let r = rows(MODIFY);
         assert_eq!(
@@ -441,6 +537,7 @@ diff --git a/a.txt b/a.txt
                 end: 2,
                 old_span: None,
                 new_span: Some((2, 2)),
+                snippet: String::new(),
                 body: Body::Delete,
             },
             Annotation {
@@ -452,6 +549,7 @@ diff --git a/a.txt b/a.txt
                 end: 9,
                 old_span: None,
                 new_span: Some((9, 9)),
+                snippet: String::new(),
                 body: Body::Comment("b".into()),
             },
             Annotation {
@@ -463,6 +561,7 @@ diff --git a/a.txt b/a.txt
                 end: 9,
                 old_span: None,
                 new_span: Some((9, 9)),
+                snippet: String::new(),
                 body: Body::Edit("x".into()),
             },
         ];

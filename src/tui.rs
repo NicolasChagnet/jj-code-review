@@ -903,7 +903,11 @@ impl App {
                     };
                     let selected = selection.is_some_and(|(f, t)| idx >= f && idx <= t);
                     let annotation = annotation_at(&self.annotations, self.file, *li, line);
-                    let bg = if selected {
+                    // The cursor row highlights like a selection, and the
+                    // background has to be on the spans themselves: padding
+                    // alone would only paint the area past the end of the text.
+                    let on_cursor = idx == cursor;
+                    let bg = if selected || on_cursor {
                         self.theme.sel_bg
                     } else if annotation.is_some() {
                         self.theme.com_bg
@@ -915,6 +919,9 @@ impl App {
                     let (sign, sign_fg) = match line.kind {
                         LineKind::Add => ("+", Color::Green),
                         LineKind::Del => ("-", Color::Red),
+                        // The cursor row shares the selection colour, so it
+                        // needs a marker of its own to stay findable.
+                        LineKind::Context if on_cursor => ("▸", self.theme.accent_fg),
                         LineKind::Context => (" ", self.theme.dim_fg),
                     };
                     let mark = annotation.map(|a| a.kind().marker()).unwrap_or(" ");
@@ -972,21 +979,13 @@ impl App {
                         Span::styled(text, text_style.add_modifier(emphasis)),
                     ];
 
-                    // The cursor row and the selection must not disagree about
-                    // the band: whoever wins owns the padding too, otherwise the
-                    // row ends in a mismatched tail.
-                    let row_bg = if selected {
-                        bg
-                    } else if idx == cursor {
-                        self.theme.cursor_bg
-                    } else {
-                        bg
-                    };
-                    if idx == cursor {
+                    // One background for the whole row, text and padding
+                    // alike, so the band reaches the pane edge unbroken.
+                    if on_cursor {
                         cursor_line = out.len();
                     }
                     let mut rendered = Line::from(spans);
-                    if let Some(bg) = row_bg {
+                    if let Some(bg) = bg {
                         rendered = pad_line(rendered, width, Some(bg));
                     }
                     out.push(rendered);
@@ -1962,7 +1961,8 @@ diff --git a/f.txt b/f.txt
  line 8
  line 9
 ";
-        let a = app_of(raw);
+        let mut a = app_of(raw);
+        a.jump_to_last();
         let (lines, _) = a.diff_lines(60);
         let rendered: Vec<String> = lines.iter().map(row_text).collect();
 
@@ -1997,6 +1997,45 @@ diff --git a/f.txt b/f.txt
                 .filter(|l| l.contains("5 + CHANGED five"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn cursor_row_background_covers_its_own_text() {
+        let a = app();
+        let (lines, cursor_line) = a.diff_lines(60);
+        let row = &lines[cursor_line];
+        // Every span, text included, sits on the cursor background; only the
+        // trailing padding may be styled separately.
+        let styled: Vec<_> = row
+            .spans
+            .iter()
+            .filter(|s| !s.content.trim().is_empty())
+            .collect();
+        assert!(!styled.is_empty());
+        for span in styled {
+            assert_eq!(
+                span.style.bg, a.theme.sel_bg,
+                "span {:?} is not on the cursor background",
+                span.content
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_row_uses_the_selection_colour() {
+        let a = app();
+        let (lines, cursor_line) = a.diff_lines(60);
+        assert_eq!(
+            lines[cursor_line].spans[0].style.bg, a.theme.sel_bg,
+            "the cursor row shares the selection band"
+        );
+        assert!(
+            lines[cursor_line]
+                .spans
+                .iter()
+                .any(|s| s.content.contains('▸')),
+            "and is marked so it stays findable"
         );
     }
 

@@ -43,9 +43,6 @@ pub struct Theme {
     pub del_bg: Option<Color>,
     pub sel_bg: Option<Color>,
     pub com_bg: Option<Color>,
-    /// Cursor line. Blending cannot produce this: the cursor has to *contrast*
-    /// with the background, so it moves away from it instead.
-    pub cursor_bg: Option<Color>,
     /// Chrome behind the status and hint bars.
     pub bar_bg: Option<Color>,
     /// Accent for annotation markers and comment text.
@@ -90,17 +87,11 @@ impl Theme {
         } else {
             (0x2a, 0x2a, 0x2a)
         };
-        let cursor = if light {
-            (0xd0, 0xd0, 0xd0)
-        } else {
-            (0x38, 0x38, 0x38)
-        };
         Self {
             add_bg: Some(blend(bg, ADD_HUE, ADD_FRACTION)),
             del_bg: Some(blend(bg, DEL_HUE, DEL_FRACTION)),
             sel_bg: Some(blend(bg, SEL_HUE, SEL_FRACTION)),
             com_bg: Some(blend(bg, COM_HUE, COM_FRACTION)),
-            cursor_bg: Some(rgb(cursor)),
             bar_bg: Some(rgb(chrome)),
             comment_fg: if light {
                 Color::Rgb(0x8a, 0x6d, 0x0f)
@@ -119,7 +110,6 @@ impl Theme {
             del_bg: None,
             sel_bg: None,
             com_bg: None,
-            cursor_bg: None,
             bar_bg: None,
             comment_fg: DEFAULT_FG,
             accent_fg: DEFAULT_FG,
@@ -204,14 +194,7 @@ mod tests {
     #[test]
     fn every_diff_tint_is_a_background_colour() {
         let t = Theme::on(Some(DARK_BG));
-        for c in [
-            t.add_bg,
-            t.del_bg,
-            t.sel_bg,
-            t.com_bg,
-            t.cursor_bg,
-            t.bar_bg,
-        ] {
+        for c in [t.add_bg, t.del_bg, t.sel_bg, t.com_bg, t.bar_bg] {
             assert!(c.is_some(), "dark theme defines all tints");
             assert!(matches!(c.unwrap(), Color::Rgb(..)));
         }
@@ -227,7 +210,6 @@ mod tests {
         };
         assert!(luma(light.add_bg) > luma(dark.add_bg), "light stays light");
         assert!(luma(light.bar_bg) > luma(dark.bar_bg));
-        assert!(luma(light.cursor_bg) > luma(dark.cursor_bg));
         // The chrome must not collide with the background on either theme.
         assert_ne!(rgb_of(light.bar_bg.unwrap()), LIGHT_BG);
         assert_ne!(rgb_of(dark.bar_bg.unwrap()), DARK_BG);
@@ -257,6 +239,8 @@ mod tests {
         let t = Theme::mono();
         assert_eq!(t.add_bg, None);
         assert_eq!(t.bar_bg, None);
+        assert_eq!(t.sel_bg, None);
+        assert_eq!(t.com_bg, None);
         assert_eq!(t.comment_fg, Color::Reset);
         assert_eq!(t.accent_fg, Color::Reset);
     }

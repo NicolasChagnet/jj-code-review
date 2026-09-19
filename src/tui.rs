@@ -89,6 +89,12 @@ pub struct App {
     file: usize,
     /// Diff cursor per file, remembered across file switches.
     cursors: Vec<usize>,
+    /// First visible rendered row of the diff pane. Kept here rather than
+    /// derived from the cursor so scrolling is minimal: the view only moves
+    /// when the cursor would leave it, not on every cursor move.
+    scroll: usize,
+    /// Diff pane height from the last draw, needed to clamp scrolling.
+    view_height: usize,
     comment_cursor: usize,
     vstart: Option<usize>,
     popup: Option<Popup>,
@@ -148,6 +154,8 @@ impl App {
             focus: Focus::Diff,
             file: 0,
             cursors,
+            scroll: 0,
+            view_height: 0,
             comment_cursor: 0,
             vstart: None,
             popup: None,
@@ -302,6 +310,10 @@ impl App {
     fn select_file(&mut self, file: usize) {
         if file >= self.files.len() {
             return;
+        }
+        if file != self.file {
+            // The offset indexes the previous file's rows.
+            self.scroll = 0;
         }
         self.file = file;
         self.vstart = None;
@@ -893,8 +905,9 @@ impl App {
 
         let (lines, cursor_line) = self.diff_lines(width);
         let height = inner.height as usize;
-        let offset = cursor_line.saturating_sub(height.saturating_sub(1));
-        frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), inner);
+        self.view_height = height;
+        self.scroll = scroll_for(self.scroll, cursor_line, height, lines.len());
+        frame.render_widget(Paragraph::new(lines).scroll((self.scroll as u16, 0)), inner);
     }
 
     /// Renders the current file's diff; also returns the screen line holding
@@ -1363,6 +1376,26 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
+/// The first visible row, given the cursor's position in the rendered diff.
+///
+/// Scrolling is minimal: the view moves only as far as needed to bring the
+/// cursor back inside it. Deriving the offset from the cursor alone would
+/// scroll on every cursor move, so stepping back up would drag the file with
+/// it instead of letting the cursor travel within the viewport.
+fn scroll_for(current: usize, cursor: usize, height: usize, total: usize) -> usize {
+    if height == 0 || total <= height {
+        return 0;
+    }
+    let moved = if cursor < current {
+        cursor
+    } else if cursor >= current + height {
+        cursor + 1 - height
+    } else {
+        current
+    };
+    moved.min(total - height)
+}
+
 /// A gutter cell: the number, or blanks when the line does not exist on that
 /// side (an addition has no old line, a deletion no new one).
 fn number_or_blank(n: Option<u32>) -> String {
@@ -1522,6 +1555,15 @@ diff --git a/a.txt b/a.txt
 
     fn app() -> App {
         app_of(MOD)
+    }
+
+    /// A diff taller than any test viewport, for scroll behaviour.
+    fn tall_app() -> App {
+        let body: String = (1..=60).map(|n| format!("+line {n}\n")).collect();
+        let raw = format!(
+            "diff --git a/t.txt b/t.txt\nnew file mode 100644\n--- /dev/null\n+++ b/t.txt\n@@ -0,0 +1,60 @@\n{body}"
+        );
+        app_of(&raw)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1964,6 +2006,101 @@ diff --git a/a.txt b/a.txt
         let raw = "diff --git a/x b/x\n";
         let a = app_of(raw);
         assert!(a.empty_state.is_some());
+    }
+
+    #[test]
+    fn scrolling_only_moves_when_the_cursor_leaves_the_view() {
+        // Cursor mid-view: scrolling up must not move the file.
+        assert_eq!(scroll_for(/*current*/ 20, /*cursor*/ 25, 10, 100), 20);
+        assert_eq!(scroll_for(20, 22, 10, 100), 20);
+        // Stepping back up inside the view keeps the file put.
+        assert_eq!(scroll_for(20, 21, 10, 100), 20);
+    }
+
+    #[test]
+    fn cursor_below_the_view_scrolls_just_enough() {
+        // Cursor at row 30 with the view at 20..30: it must land on the last row.
+        assert_eq!(scroll_for(20, 30, 10, 100), 21);
+        assert_eq!(scroll_for(0, 10, 10, 100), 1);
+    }
+
+    #[test]
+    fn cursor_above_the_view_scrolls_just_enough() {
+        assert_eq!(scroll_for(50, 49, 10, 100), 49);
+        assert_eq!(scroll_for(50, 20, 10, 100), 20);
+    }
+
+    #[test]
+    fn short_files_never_scroll_and_never_leave_a_gap() {
+        assert_eq!(scroll_for(0, 3, 10, 5), 0);
+        // Walking past the end clamps so the last row stays at the bottom.
+        assert_eq!(scroll_for(0, 99, 10, 100), 90);
+    }
+
+    #[test]
+    fn the_reported_annoyance_is_gone_end_to_end() {
+        // Drive a real App through the key handler: walk down until the view
+        // scrolls, then walk back up and check the file stays put while the
+        // cursor is still inside the view.
+        let mut a = tall_app();
+        let height = 4usize;
+        let total = a.rows().len();
+        assert!(total > height * 2, "fixture must be taller than the view");
+
+        let mut scroll = 0usize;
+        let mut cursor = a.content_of_row(a.cursor());
+        while a.cursor() + 1 < a.rows().len() {
+            a.handle_key(key(KeyCode::Char('j')));
+            cursor = a.content_of_row(a.cursor());
+            scroll = scroll_for(scroll, cursor, height, total);
+        }
+        assert!(scroll > 0, "the view scrolled while walking down");
+        let bottomed = scroll;
+
+        let mut moved_early = false;
+        for _ in 0..3 {
+            a.handle_key(key(KeyCode::Char('k')));
+            let c = a.content_of_row(a.cursor());
+            let new = scroll_for(scroll, c, height, total);
+            if new != bottomed {
+                moved_early = true;
+            }
+            scroll = new;
+        }
+        assert!(
+            !moved_early,
+            "the file moved while the cursor was still inside the view"
+        );
+        let _ = (cursor, bottomed);
+    }
+
+    #[test]
+    fn walking_down_then_up_does_not_drag_the_file() {
+        // The reported annoyance: reach the bottom, scroll, then come back.
+        let (height, total) = (10, 200);
+        let mut scroll = 0;
+        let mut positions = Vec::new();
+        for cursor in 0..25 {
+            scroll = scroll_for(scroll, cursor, height, total);
+            positions.push(scroll);
+        }
+        assert_eq!(scroll, 15, "cursor at 24 sits on the last visible row");
+        // Coming back up, the file stays put until the cursor reaches the top.
+        let mut back = Vec::new();
+        for cursor in (0..25).rev() {
+            scroll = scroll_for(scroll, cursor, height, total);
+            back.push((cursor, scroll));
+        }
+        // The view only moves once the cursor hits the first visible row (15).
+        for (cursor, sc) in &back {
+            if *cursor >= 15 {
+                assert_eq!(*sc, 15, "cursor {cursor} should not move the view");
+            }
+        }
+        let at_fifteen = back.iter().find(|(c, _)| *c == 15).unwrap().1;
+        assert_eq!(at_fifteen, 15);
+        let at_fourteen = back.iter().find(|(c, _)| *c == 14).unwrap().1;
+        assert_eq!(at_fourteen, 14, "only now does the view follow");
     }
 
     fn row_text(line: &Line) -> String {

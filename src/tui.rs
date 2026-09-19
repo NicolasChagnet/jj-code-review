@@ -657,12 +657,18 @@ impl App {
             .split(area);
         let sidebar = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(cols[0]);
-        let body = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(cols[1]);
+        let body = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(cols[1]);
 
         self.draw_files(frame, sidebar[0]);
         self.draw_comments(frame, sidebar[1]);
         self.draw_diff(frame, body[0]);
-        self.draw_status(frame, body[1]);
+        self.draw_keys(frame, body[1]);
+        self.draw_status(frame, body[2]);
 
         if self.help {
             draw_help(frame, area);
@@ -869,6 +875,105 @@ impl App {
         (out, cursor_line)
     }
 
+    /// Contextual key hints directly under the diff pane.
+    ///
+    /// Lists what the focused pane's keys do right now: the selection-aware
+    /// actions change when `v` is active, and each pane gets its own movement
+    /// keys.
+    fn draw_keys(&self, frame: &mut Frame, area: Rect) {
+        if area.width == 0 {
+            return;
+        }
+        let mut spans = vec![Span::raw(" ")];
+        let hints = self.context_hints();
+        let mut first = true;
+        let mut used = 1usize;
+        let width = area.width as usize;
+        for (key, label) in hints {
+            // Rough cost: key + separator + label + spacing.
+            let cost = key.chars().count() + label.chars().count() + 4;
+            if !first && used + cost > width {
+                break;
+            }
+            if !first {
+                spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+                used += 3;
+            }
+            spans.push(Span::styled(
+                key,
+                Style::default().fg(COMMENT_FG).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
+            used += cost;
+            first = false;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(BAR_BG)),
+            area,
+        );
+    }
+
+    /// The key/action pairs relevant to the current focus and state.
+    fn context_hints(&self) -> Vec<(&'static str, &'static str)> {
+        if self.popup.is_some() {
+            return vec![
+                ("Enter", "save"),
+                ("Esc", "cancel"),
+                ("Ctrl+J", "newline"),
+                ("Ctrl+W", "word"),
+                ("Ctrl+K", "kill"),
+            ];
+        }
+        if self.help {
+            return vec![("any key", "close help")];
+        }
+        match self.focus {
+            Focus::Diff => {
+                let mut hints = vec![("j/k", "line"), ("] / [", "hunk"), ("g/G", "top/end")];
+                if self.selection().is_some() {
+                    hints.push(("v", "cancel selection"));
+                    hints.push(("c", "comment range"));
+                    hints.push(("e", "edit range"));
+                    hints.push(("x", "delete range"));
+                } else {
+                    hints.push(("v", "select"));
+                    hints.push(("c", "comment"));
+                    hints.push(("e", "edit"));
+                    hints.push(("x", "delete"));
+                }
+                hints.push(("d", "clear here"));
+                hints.push(("n/p", "file"));
+                hints.push(("Tab", "pane"));
+                hints.push(("s", "submit"));
+                hints.push(("q", "quit"));
+                hints.push(("?", "help"));
+                hints
+            }
+            Focus::Files => vec![
+                ("j/k", "file"),
+                ("Enter", "open"),
+                ("n/p", "file"),
+                ("c/e/x", "annotate"),
+                ("Tab", "pane"),
+                ("s", "submit"),
+                ("q", "quit"),
+                ("?", "help"),
+            ],
+            Focus::Comments => vec![
+                ("j/k", "annotation"),
+                ("g/G", "first/last"),
+                ("Enter", "goto"),
+                ("d", "delete"),
+                ("c/e/x", "annotate"),
+                ("Tab", "pane"),
+                ("s", "submit"),
+                ("q", "quit"),
+                ("?", "help"),
+            ],
+        }
+    }
+
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
         let desc = self.target.head.short_description();
         let mut spans = vec![
@@ -901,15 +1006,11 @@ impl App {
                 Style::default().fg(Color::Cyan),
             ),
         ];
-        match &self.flash {
-            Some(flash) => spans.push(Span::styled(
+        if let Some(flash) = &self.flash {
+            spans.push(Span::styled(
                 format!(" {}", flash.text),
                 Style::default().fg(COMMENT_FG),
-            )),
-            None => spans.push(Span::styled(
-                " Tab focus · c comment · e edit · x delete · v select · s submit · q quit · ? help",
-                Style::default().fg(Color::DarkGray),
-            )),
+            ));
         }
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(Style::default().bg(BAR_BG)),
@@ -1471,6 +1572,68 @@ diff --git a/a.txt b/a.txt
     fn per_file_badge_counts() {
         let a = app_user_two_annotations();
         assert_eq!(counts_for(&a.annotations, 0), (2, 0, 0));
+    }
+
+    fn hint_keys(a: &App) -> Vec<&'static str> {
+        a.context_hints().into_iter().map(|(k, _)| k).collect()
+    }
+
+    #[test]
+    fn hints_are_contextual_per_pane() {
+        let mut a = app();
+        let diff = hint_keys(&a);
+        assert!(diff.contains(&"v"));
+
+        a.focus = Focus::Files;
+        let files = hint_keys(&a);
+        assert!(files.contains(&"Enter"));
+        assert!(!files.contains(&"v"), "selection is a diff-pane idea");
+
+        a.focus = Focus::Comments;
+        let comments = hint_keys(&a);
+        assert!(comments.contains(&"Enter"));
+        assert!(!comments.contains(&"] / ["), "hunk keys are diff-only");
+    }
+
+    #[test]
+    fn hints_follow_the_selection_state() {
+        let mut a = app();
+        assert!(a.context_hints().iter().any(|(_, l)| *l == "select"));
+        assert!(
+            !a.context_hints()
+                .iter()
+                .any(|(_, l)| *l == "cancel selection")
+        );
+
+        a.handle_key(key(KeyCode::Char('v')));
+        assert!(a.selection().is_some());
+        assert!(
+            a.context_hints()
+                .iter()
+                .any(|(_, l)| *l == "cancel selection"),
+            "with a selection the labels describe range actions"
+        );
+        assert!(
+            a.context_hints().iter().any(|(_, l)| *l == "comment range"),
+            "c acts on the range once one exists"
+        );
+    }
+
+    #[test]
+    fn hints_switch_to_popup_and_help() {
+        let mut a = app();
+        a.set_cursor(a.row_of_content(0));
+        a.open_popup(Kind::Comment);
+        let popup = a.context_hints();
+        assert!(popup.iter().any(|(k, _)| *k == "Ctrl+J"));
+        assert!(
+            !popup.iter().any(|(k, _)| *k == "s"),
+            "submit is not a popup key"
+        );
+
+        a.popup = None;
+        a.help = true;
+        assert_eq!(a.context_hints(), vec![("any key", "close help")]);
     }
 
     #[test]

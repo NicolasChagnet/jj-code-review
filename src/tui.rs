@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
@@ -61,14 +61,19 @@ struct Flash {
     frames: u8,
 }
 
-/// The comment/edit entry popup.
+/// The comment/edit entry box, docked under the diff pane.
 struct Popup {
     input: TextInput,
+    /// Which file the annotation belongs to. Captured on open so switching
+    /// files (via the Files pane, `n`/`p`) cannot retarget it.
+    file: usize,
     /// Range to anchor on save; `None` when editing an existing annotation.
     range: Option<(usize, usize)>,
-    /// Index into `annotations` when this popup edits in place.
+    /// Index into `annotations` when this box edits in place.
     existing: Option<usize>,
     kind: Kind,
+    /// Whole-file comment: no line range, no side.
+    file_scope: bool,
     title: String,
 }
 
@@ -196,7 +201,16 @@ impl App {
 
     /// Content-row index of a diff row.
     fn content_of_row(&self, row: usize) -> usize {
-        self.rows()
+        self.content_index_in(self.file, row)
+    }
+
+    /// Content-row index of a diff row within `file`, which may not be the
+    /// current one while an annotation box is open for another file.
+    fn content_index_in(&self, file: usize, row: usize) -> usize {
+        self.rows
+            .get(file)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
             .iter()
             .take(row + 1)
             .filter(|r| matches!(r, Row::Line(_)))
@@ -335,45 +349,74 @@ impl App {
                 Body::Comment(t) | Body::Edit(t) => t.clone(),
                 Body::Delete => String::new(),
             };
-            let label = self.annotations[idx].label();
-            self.start_popup(
-                kind,
-                body,
-                idx,
-                None,
-                format!("{} on {label}", kind_title(kind)),
-            );
+            self.start_box(kind, body, Some(idx), None, false);
             return;
         }
 
         let probe = body_for(kind, String::new());
         match model::anchor(self.file, &lines, cf, ct, probe) {
-            Ok(target) => {
+            Ok(_) => {
                 let prefill = if kind == Kind::Edit {
                     model::new_side_content(&lines, cf, ct)
                 } else {
                     String::new()
                 };
-                let title = format!("{} on {}", kind_title(kind), target.label());
-                self.start_popup(kind, prefill, usize::MAX, Some((from, to)), title);
+                self.start_box(kind, prefill, None, Some((from, to)), false);
             }
             Err(e) => self.flash(anchor_message(e)),
         }
     }
 
-    fn start_popup(
+    /// `c` from the Files pane: comment on the file as a whole.
+    fn open_file_comment(&mut self) {
+        let file = self.file;
+        if let Some(idx) = self
+            .annotations
+            .iter()
+            .position(|a| a.file == file && a.is_file_scope() && a.kind() == Kind::Comment)
+        {
+            let text = match &self.annotations[idx].body {
+                Body::Comment(t) => t.clone(),
+                _ => String::new(),
+            };
+            self.start_box(Kind::Comment, text, Some(idx), None, true);
+            return;
+        }
+        self.start_box(Kind::Comment, String::new(), None, None, true);
+    }
+
+    fn start_box(
         &mut self,
         kind: Kind,
         text: String,
-        existing: usize,
+        existing: Option<usize>,
         range: Option<(usize, usize)>,
-        title: String,
+        file_scope: bool,
     ) {
+        let file = self.file;
+        let title = match (file_scope, existing) {
+            (true, _) => format!("{} on this file", kind_title(kind)),
+            (false, Some(idx)) => {
+                format!("{} on {}", kind_title(kind), self.annotations[idx].label())
+            }
+            (false, None) => {
+                let lines = self.lines(file).to_vec();
+                let (cf, ct) = range
+                    .map(|(f, t)| (self.content_of_row(f), self.content_of_row(t)))
+                    .unwrap_or((0, 0));
+                match model::anchor(file, &lines, cf, ct, body_for(kind, String::new())) {
+                    Ok(a) => format!("{} on {}", kind_title(kind), a.label()),
+                    Err(_) => kind_title(kind).to_string(),
+                }
+            }
+        };
         self.popup = Some(Popup {
             input: TextInput::from(&text),
+            file,
             range,
-            existing: (existing != usize::MAX).then_some(existing),
+            existing,
             kind,
+            file_scope,
             title,
         });
         self.vstart = None;
@@ -382,11 +425,15 @@ impl App {
     /// An existing annotation of `kind` covering exactly this content range.
     fn find_covering(&self, kind: Kind, cf: usize, ct: usize) -> Option<usize> {
         self.annotations.iter().position(|a| {
-            a.kind() == kind && a.file == self.file && a.anchor_row == cf && a.max_row() == ct
+            !a.is_file_scope()
+                && a.kind() == kind
+                && a.file == self.file
+                && a.anchor_row == cf
+                && a.max_row() == ct
         })
     }
 
-    fn save_popup(&mut self) {
+    fn save_box(&mut self) {
         let Some(popup) = self.popup.take() else {
             return;
         };
@@ -404,12 +451,26 @@ impl App {
             }
             return;
         }
+
+        let file = popup.file;
+        let body = body_for(popup.kind, text);
+        if popup.file_scope {
+            match model::file_anchor(file, body) {
+                Ok(a) => self.annotations.push(a),
+                Err(e) => self.flash(anchor_message(e)),
+            }
+            return;
+        }
+
         let Some((from, to)) = popup.range else {
             return;
         };
-        let lines = self.lines(self.file).to_vec();
-        let (cf, ct) = (self.content_of_row(from), self.content_of_row(to));
-        match model::anchor(self.file, &lines, cf, ct, body_for(popup.kind, text)) {
+        let lines = self.lines(file).to_vec();
+        let (cf, ct) = (
+            self.content_index_in(file, from),
+            self.content_index_in(file, to),
+        );
+        match model::anchor(file, &lines, cf, ct, body) {
             Ok(a) => {
                 if popup.kind == Kind::Edit
                     && a_text(&a).trim_end() == model::new_side_content(&lines, cf, ct).trim_end()
@@ -450,11 +511,23 @@ impl App {
         let li = self.content_of_row(row);
         let before = self.annotations.len();
         self.annotations
-            .retain(|a| !(a.file == self.file && a.anchor_row == li));
+            .retain(|a| !(a.file == self.file && !a.is_file_scope() && a.anchor_row == li));
         if self.annotations.len() == before {
             self.flash("No annotation here");
         } else {
             self.flash("Annotations cleared");
+        }
+    }
+
+    /// `d` in the Files pane: drop every annotation on the selected file.
+    fn clear_file_annotations(&mut self) {
+        let file = self.file;
+        let before = self.annotations.len();
+        self.annotations.retain(|a| a.file != file);
+        if self.annotations.len() == before {
+            self.flash("No annotations on this file");
+        } else {
+            self.flash("File annotations cleared");
         }
     }
 
@@ -572,12 +645,18 @@ impl App {
                     Some(self.cursor())
                 };
             }
-            KeyCode::Char('c') if !ctrl => self.open_popup(Kind::Comment),
+            // From the Files pane, `c` comments on the whole file; the
+            // line-oriented actions belong to the diff and comments panes.
+            KeyCode::Char('c') if !ctrl => match self.focus {
+                Focus::Files => self.open_file_comment(),
+                _ => self.open_popup(Kind::Comment),
+            },
             KeyCode::Char('e') if !ctrl => self.open_popup(Kind::Edit),
             KeyCode::Char('x') if !ctrl => self.mark_delete(),
             KeyCode::Char('d') if !ctrl => match self.focus {
                 Focus::Comments => self.delete_selected_annotation(),
-                _ => self.clear_at_cursor(),
+                Focus::Files => self.clear_file_annotations(),
+                Focus::Diff => self.clear_at_cursor(),
             },
             KeyCode::Esc if self.vstart.is_some() => self.vstart = None,
             KeyCode::Esc => {
@@ -597,7 +676,7 @@ impl App {
     fn popup_key(&mut self, ev: KeyEvent) {
         match ev.code {
             KeyCode::Esc => self.popup = None,
-            KeyCode::Enter => self.save_popup(),
+            KeyCode::Enter => self.save_box(),
             _ => {
                 if let Some(popup) = &mut self.popup {
                     popup.input.handle_key(&ev);
@@ -657,8 +736,12 @@ impl App {
             .split(area);
         let sidebar = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(cols[0]);
+        // The entry box is docked under the diff, above the hint and status
+        // rows, so it never covers the code being reviewed.
+        let input_height = self.input_height();
         let body = Layout::vertical([
             Constraint::Min(1),
+            Constraint::Length(input_height),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
@@ -667,14 +750,23 @@ impl App {
         self.draw_files(frame, sidebar[0]);
         self.draw_comments(frame, sidebar[1]);
         self.draw_diff(frame, body[0]);
-        self.draw_keys(frame, body[1]);
-        self.draw_status(frame, body[2]);
+        if input_height > 0 {
+            self.draw_input(frame, body[1]);
+        }
+        self.draw_keys(frame, body[2]);
+        self.draw_status(frame, body[3]);
 
         if self.help {
             draw_help(frame, area);
         }
-        if self.popup.is_some() {
-            self.draw_popup(frame, area);
+    }
+
+    /// Rows reserved for the entry box: zero when it is closed. The box grows
+    /// with its content, capped so the diff always keeps some room.
+    fn input_height(&self) -> u16 {
+        match &self.popup {
+            None => 0,
+            Some(popup) => (popup.input.line_count() as u16 + 2).clamp(3, 10),
         }
     }
 
@@ -954,7 +1046,9 @@ impl App {
                 ("j/k", "file"),
                 ("Enter", "open"),
                 ("n/p", "file"),
-                ("c/e/x", "annotate"),
+                ("c", "comment file"),
+                ("d", "clear file"),
+                ("e/x", "line actions"),
                 ("Tab", "pane"),
                 ("s", "submit"),
                 ("q", "quit"),
@@ -1018,32 +1112,14 @@ impl App {
         );
     }
 
-    fn draw_popup(&mut self, frame: &mut Frame, area: Rect) {
+    /// The docked comment/edit entry box.
+    fn draw_input(&mut self, frame: &mut Frame, area: Rect) {
         let Some(popup) = &self.popup else {
             return;
         };
-        let width = area.width.saturating_sub(8).min(72);
-        let height = (popup.input.line_count() as u16 + 2)
-            .max(3)
-            .min(area.height.saturating_sub(2));
-        let rect = centered(area, width, height);
-        frame.render_widget(Clear, rect);
         popup
             .input
-            .render(frame, rect, &format!(" {} ", popup.title));
-        let hint = Rect {
-            y: rect.y.saturating_sub(1),
-            height: 1,
-            ..rect
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "Enter: save   Esc: cancel   Ctrl+J: newline",
-                Style::default().fg(Color::DarkGray),
-            )))
-            .alignment(Alignment::Left),
-            hint,
-        );
+            .render(frame, area, &format!(" {} ", popup.title));
     }
 }
 
@@ -1452,7 +1528,7 @@ diff --git a/a.txt b/a.txt
         a.set_cursor(a.row_of_content(0));
         a.open_popup(Kind::Comment);
         type_into_popup(&mut a, "  needs a test  ");
-        a.save_popup();
+        a.save_box();
         assert_eq!(a.annotations.len(), 1);
         let ann = &a.annotations[0];
         assert_eq!(ann.kind(), Kind::Comment);
@@ -1467,7 +1543,7 @@ diff --git a/a.txt b/a.txt
         a.set_cursor(a.row_of_content(0));
         a.open_popup(Kind::Comment);
         type_into_popup(&mut a, "   ");
-        a.save_popup();
+        a.save_box();
         assert!(a.annotations.is_empty());
     }
 
@@ -1477,7 +1553,7 @@ diff --git a/a.txt b/a.txt
         a.set_cursor(a.row_of_content(0));
         a.open_popup(Kind::Edit);
         // The popup starts with the line's own content, so saving is a no-op.
-        a.save_popup();
+        a.save_box();
         assert!(a.annotations.is_empty());
     }
 
@@ -1490,7 +1566,7 @@ diff --git a/a.txt b/a.txt
             p.input.move_end();
             p.input.insert_text("!");
         }
-        a.save_popup();
+        a.save_box();
         assert_eq!(a.annotations.len(), 1);
         assert_eq!(a_text(&a.annotations[0]), "one!");
     }
@@ -1523,12 +1599,12 @@ diff --git a/a.txt b/a.txt
         a.set_cursor(a.row_of_content(0));
         a.open_popup(Kind::Comment);
         type_into_popup(&mut a, "first");
-        a.save_popup();
+        a.save_box();
         let anchor_row = a.annotations[0].anchor_row;
         a.set_cursor(a.row_of_content(anchor_row));
         a.open_popup(Kind::Comment);
         type_into_popup(&mut a, " updated");
-        a.save_popup();
+        a.save_box();
         assert_eq!(a.annotations.len(), 1, "in-place edit, not a duplicate");
         assert_eq!(a_text(&a.annotations[0]), "first updated");
     }
@@ -1550,11 +1626,11 @@ diff --git a/a.txt b/a.txt
         a.set_cursor(a.row_of_content(0));
         a.open_popup(Kind::Comment);
         type_into_popup(&mut a, "a");
-        a.save_popup();
+        a.save_box();
         a.set_cursor(a.row_of_content(4));
         a.open_popup(Kind::Comment);
         type_into_popup(&mut a, "b");
-        a.save_popup();
+        a.save_box();
         a
     }
 
@@ -1572,6 +1648,106 @@ diff --git a/a.txt b/a.txt
     fn per_file_badge_counts() {
         let a = app_user_two_annotations();
         assert_eq!(counts_for(&a.annotations, 0), (2, 0, 0));
+    }
+
+    #[test]
+    fn file_pane_comment_is_file_scoped() {
+        let mut a = app_of(TWO_FILES);
+        a.focus = Focus::Files;
+        a.handle_key(key(KeyCode::Char('c')));
+        assert!(a.popup.is_some(), "the docked box opens");
+        assert!(a.popup.as_ref().unwrap().file_scope);
+        type_into_popup(&mut a, "this whole file needs tests");
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.annotations.len(), 1);
+        let ann = &a.annotations[0];
+        assert!(ann.is_file_scope());
+        assert_eq!(ann.label(), "whole file");
+        assert_eq!((ann.start, ann.end), (0, 0));
+        assert_eq!(a_text(ann), "this whole file needs tests");
+        assert!(!ann.covers(0, &a.lines(0)[0]), "file scope covers no rows");
+    }
+
+    #[test]
+    fn file_pane_comment_reopens_in_place() {
+        let mut a = app_of(TWO_FILES);
+        a.focus = Focus::Files;
+        a.handle_key(key(KeyCode::Char('c')));
+        type_into_popup(&mut a, "first");
+        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Char('c')));
+        type_into_popup(&mut a, " updated");
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.annotations.len(), 1, "edits in place, no duplicate");
+        assert_eq!(a_text(&a.annotations[0]), "first updated");
+    }
+
+    #[test]
+    fn file_pane_comment_follows_the_selected_file() {
+        let mut a = app_of(TWO_FILES);
+        a.focus = Focus::Files;
+        a.next_file();
+        assert_eq!(a.file, 1);
+        a.handle_key(key(KeyCode::Char('c')));
+        type_into_popup(&mut a, "on the second file");
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.annotations[0].file, 1);
+    }
+
+    #[test]
+    fn switching_files_does_not_retarget_an_open_box() {
+        let mut a = app_of(TWO_FILES);
+        a.set_cursor(a.row_of_content(0));
+        a.handle_key(key(KeyCode::Char('c')));
+        type_into_popup(&mut a, "for file zero");
+        a.next_file();
+        assert_eq!(a.file, 1, "the pane moved on");
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.annotations.len(), 1);
+        assert_eq!(
+            a.annotations[0].file, 0,
+            "anchored to the file it opened on"
+        );
+    }
+
+    #[test]
+    fn clear_file_annotations_drops_only_that_file() {
+        let mut a = app_of(TWO_FILES);
+        a.focus = Focus::Files;
+        a.handle_key(key(KeyCode::Char('c')));
+        type_into_popup(&mut a, "file zero");
+        a.handle_key(key(KeyCode::Enter));
+        a.next_file();
+        a.handle_key(key(KeyCode::Char('c')));
+        type_into_popup(&mut a, "file one");
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.annotations.len(), 2);
+
+        a.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(a.annotations.len(), 1);
+        assert_eq!(a.annotations[0].file, 0, "only file one was cleared");
+    }
+
+    #[test]
+    fn input_panel_only_takes_space_while_open() {
+        let mut a = app();
+        assert_eq!(a.input_height(), 0);
+        a.set_cursor(a.row_of_content(0));
+        a.handle_key(key(KeyCode::Char('c')));
+        assert!(a.input_height() >= 3);
+        a.handle_key(key(KeyCode::Esc));
+        assert_eq!(a.input_height(), 0, "the diff gets its rows back");
+    }
+
+    #[test]
+    fn input_panel_growth_is_capped() {
+        let mut a = app();
+        a.set_cursor(a.row_of_content(0));
+        a.handle_key(key(KeyCode::Char('c')));
+        if let Some(p) = &mut a.popup {
+            p.input.insert_text(&"x\n".repeat(40));
+        }
+        assert_eq!(a.input_height(), 10, "a long comment cannot eat the diff");
     }
 
     fn hint_keys(a: &App) -> Vec<&'static str> {
@@ -1707,7 +1883,7 @@ diff --git a/a.txt b/a.txt
         a.set_cursor(a.row_of_content(0));
         a.open_popup(Kind::Comment);
         type_into_popup(&mut a, "hello\nthere");
-        a.save_popup();
+        a.save_box();
         let (lines, cursor_line) = a.diff_lines(60);
         let rendered: String = lines
             .iter()

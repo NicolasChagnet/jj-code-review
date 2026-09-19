@@ -27,15 +27,7 @@ use crate::diff::{DiffLine, FileDiff, LineKind, Status};
 use crate::input::TextInput;
 use crate::jj::Target;
 use crate::model::{self, AnchorError, Annotation, Body, Kind};
-
-// Diff tints, mirroring the reference plugin's blend fractions.
-const ADD_BG: Color = Color::Rgb(20, 46, 26);
-const DEL_BG: Color = Color::Rgb(50, 22, 24);
-const SEL_BG: Color = Color::Rgb(24, 42, 66);
-const COM_BG: Color = Color::Rgb(48, 42, 18);
-const CURSOR_BG: Color = Color::Rgb(38, 38, 38);
-const BAR_BG: Color = Color::Rgb(24, 24, 24);
-const COMMENT_FG: Color = Color::Rgb(227, 179, 65);
+use crate::theme::Theme;
 
 const SIDEBAR_WIDTH: u16 = 28;
 const PAGE: usize = 20;
@@ -96,6 +88,7 @@ pub struct App {
     vstart: Option<usize>,
     popup: Option<Popup>,
     flash: Option<Flash>,
+    theme: Theme,
     help: bool,
     /// `Some(true)` on submit, `Some(false)` when the user quits.
     outcome: Option<bool>,
@@ -144,6 +137,7 @@ impl App {
             vstart: None,
             popup: None,
             flash: None,
+            theme: Theme::from_env(),
             help: false,
             outcome: None,
         }
@@ -757,7 +751,7 @@ impl App {
         self.draw_status(frame, body[3]);
 
         if self.help {
-            draw_help(frame, area);
+            draw_help(frame, area, &self.theme);
         }
     }
 
@@ -788,13 +782,13 @@ impl App {
                 if c > 0 {
                     spans.push(Span::styled(
                         format!(" ●{c}"),
-                        Style::default().fg(COMMENT_FG),
+                        Style::default().fg(self.theme.comment_fg),
                     ));
                 }
                 if e > 0 {
                     spans.push(Span::styled(
                         format!(" ✎{e}"),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(self.theme.accent_fg),
                     ));
                 }
                 if d > 0 {
@@ -812,7 +806,11 @@ impl App {
             state.select(Some(self.file.min(self.files.len() - 1)));
         }
         let list = List::new(items)
-            .block(pane_block(" Files ", self.focus == Focus::Files))
+            .block(pane_block(
+                " Files ",
+                self.focus == Focus::Files,
+                &self.theme,
+            ))
             .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED));
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -837,7 +835,7 @@ impl App {
                 );
                 let room = width.saturating_sub(head.chars().count());
                 ListItem::new(Line::from(vec![
-                    Span::styled(head, Style::default().fg(COMMENT_FG)),
+                    Span::styled(head, Style::default().fg(self.theme.comment_fg)),
                     Span::raw(truncate(a_text(a).lines().next().unwrap_or(""), room)),
                 ]))
             })
@@ -848,13 +846,17 @@ impl App {
             state.select(Some(self.comment_cursor.min(ordered.len() - 1)));
         }
         let list = List::new(items)
-            .block(pane_block(" Comments ", self.focus == Focus::Comments))
+            .block(pane_block(
+                " Comments ",
+                self.focus == Focus::Comments,
+                &self.theme,
+            ))
             .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED));
         frame.render_stateful_widget(list, area, &mut state);
     }
 
     fn draw_diff(&mut self, frame: &mut Frame, area: Rect) {
-        let block = pane_block(" Diff ", self.focus == Focus::Diff);
+        let block = pane_block(" Diff ", self.focus == Focus::Diff, &self.theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let width = inner.width as usize;
@@ -893,7 +895,7 @@ impl App {
             match row {
                 Row::Hunk(header) => out.push(Line::from(Span::styled(
                     truncate(&format!(" {header}"), width),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(self.theme.accent_fg),
                 ))),
                 Row::Line(li) => {
                     let Some(line) = self.line_at_content(*li) else {
@@ -902,18 +904,18 @@ impl App {
                     let selected = selection.is_some_and(|(f, t)| idx >= f && idx <= t);
                     let annotation = annotation_at(&self.annotations, self.file, *li, line);
                     let bg = if selected {
-                        Some(SEL_BG)
+                        self.theme.sel_bg
                     } else if annotation.is_some() {
-                        Some(COM_BG)
+                        self.theme.com_bg
                     } else {
-                        line_tint(line.kind)
+                        self.theme.tint(line.kind)
                     };
                     let base = bg_style(bg);
 
                     let (sign, sign_fg) = match line.kind {
                         LineKind::Add => ("+", Color::Green),
                         LineKind::Del => ("-", Color::Red),
-                        LineKind::Context => (" ", Color::Gray),
+                        LineKind::Context => (" ", self.theme.dim_fg),
                     };
                     let num = match line.kind {
                         LineKind::Add => line.new_ln,
@@ -939,25 +941,25 @@ impl App {
                         text.push('…');
                     }
                     let spans = vec![
-                        Span::styled(format!("{mark} "), base.fg(COMMENT_FG)),
+                        Span::styled(format!("{mark} "), base.fg(self.theme.comment_fg)),
                         Span::styled(
                             format!("{:>4} ", num.unwrap_or(0)),
-                            base.fg(Color::DarkGray),
+                            base.fg(self.theme.dim_fg),
                         ),
                         Span::styled(format!("{sign} "), base.fg(sign_fg)),
                         Span::styled(text, text_style),
                     ];
                     let mut rendered = Line::from(spans);
                     if idx == cursor {
-                        rendered = pad_line(rendered, width, CURSOR_BG);
+                        rendered = pad_line(rendered, width, self.theme.cursor_bg);
                         cursor_line = out.len();
-                    } else {
-                        rendered = pad_line(rendered, width, bg.unwrap_or(BAR_BG));
+                    } else if let Some(bg) = bg {
+                        rendered = pad_line(rendered, width, Some(bg));
                     }
                     out.push(rendered);
 
                     if let Some(a) = annotation.filter(|a| a.max_row() == *li) {
-                        for l in annotation_rows(a, width) {
+                        for l in annotation_rows(a, width, &self.theme) {
                             out.push(l);
                         }
                     }
@@ -988,20 +990,22 @@ impl App {
                 break;
             }
             if !first {
-                spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(" · ", Style::default().fg(self.theme.dim_fg)));
                 used += 3;
             }
             spans.push(Span::styled(
                 key,
-                Style::default().fg(COMMENT_FG).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(self.theme.comment_fg)
+                    .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(label, Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(label, Style::default().fg(self.theme.dim_fg)));
             used += cost;
             first = false;
         }
         frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(Style::default().bg(BAR_BG)),
+            Paragraph::new(Line::from(spans)).style(bg_style(self.theme.bar_bg)),
             area,
         );
     }
@@ -1097,17 +1101,17 @@ impl App {
                     Focus::Files => "[files] ",
                     Focus::Comments => "[comments] ",
                 },
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(self.theme.accent_fg),
             ),
         ];
         if let Some(flash) = &self.flash {
             spans.push(Span::styled(
                 format!(" {}", flash.text),
-                Style::default().fg(COMMENT_FG),
+                Style::default().fg(self.theme.comment_fg),
             ));
         }
         frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(Style::default().bg(BAR_BG)),
+            Paragraph::new(Line::from(spans)).style(bg_style(self.theme.bar_bg)),
             area,
         );
     }
@@ -1125,11 +1129,11 @@ impl App {
 
 // --- helpers ---------------------------------------------------------------
 
-fn pane_block(title: &str, active: bool) -> Block<'static> {
+fn pane_block(title: &str, active: bool, theme: &Theme) -> Block<'static> {
     let style = if active {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.accent_fg)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.dim_fg)
     };
     Block::default()
         .borders(Borders::ALL)
@@ -1142,14 +1146,16 @@ fn pane_block(title: &str, active: bool) -> Block<'static> {
         .title(title.to_string())
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     let rect = centered(area, 68, 21);
     frame.render_widget(Clear, rect);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme.dim_fg);
     let text = vec![
         Line::from(Span::styled(
             "jcr — review keys",
-            Style::default().fg(COMMENT_FG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.comment_fg)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from("Tab / Shift+Tab   cycle Diff · Files · Comments"),
@@ -1172,7 +1178,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         )),
         Line::from(Span::styled("Any key closes this help.", dim)),
     ];
-    frame.render_widget(Paragraph::new(text).block(pane_block(" Help ", true)), rect);
+    frame.render_widget(
+        Paragraph::new(text).block(pane_block(" Help ", true, theme)),
+        rect,
+    );
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -1196,14 +1205,6 @@ fn last_content_row(rows: &[Row]) -> usize {
     rows.iter()
         .rposition(|r| matches!(r, Row::Line(_)))
         .unwrap_or(0)
-}
-
-fn line_tint(kind: LineKind) -> Option<Color> {
-    match kind {
-        LineKind::Add => Some(ADD_BG),
-        LineKind::Del => Some(DEL_BG),
-        LineKind::Context => None,
-    }
 }
 
 fn bg_style(bg: Option<Color>) -> Style {
@@ -1298,25 +1299,29 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
-fn pad_line(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
+fn pad_line(line: Line<'static>, width: usize, bg: Option<Color>) -> Line<'static> {
     let used: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
     let mut spans = line.spans;
     if used < width {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(bg),
-        ));
+        spans.push(Span::styled(" ".repeat(width - used), bg_style(bg)));
     }
     Line::from(spans)
 }
 
 /// The inline block rendered under an annotation's last row.
-fn annotation_rows(a: &Annotation, width: usize) -> Vec<Line<'static>> {
-    let style = Style::default().bg(COM_BG).fg(COMMENT_FG);
+fn annotation_rows(a: &Annotation, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let style = Style::default()
+        .bg(theme.com_bg.unwrap_or(Color::Reset))
+        .fg(theme.comment_fg);
+    let block = |s: Style| {
+        Style::default()
+            .bg(theme.com_bg.unwrap_or(Color::Reset))
+            .patch(s)
+    };
     match &a.body {
         Body::Delete => vec![Line::from(Span::styled(
             truncate("    ✗ delete here", width),
-            Style::default().bg(COM_BG).fg(Color::Red),
+            block(Style::default().fg(Color::Red)),
         ))],
         Body::Comment(text) | Body::Edit(text) => {
             let head = match a.kind() {

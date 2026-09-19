@@ -13,6 +13,7 @@ mod input;
 mod jj;
 mod model;
 mod output;
+mod theme;
 mod tui;
 
 use std::io::{self, IsTerminal, Write};

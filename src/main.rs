@@ -9,6 +9,7 @@
 //! runtime error.
 
 mod diff;
+mod highlight;
 mod input;
 mod jj;
 mod model;

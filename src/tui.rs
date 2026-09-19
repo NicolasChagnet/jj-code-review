@@ -13,6 +13,7 @@
 //!
 //! The diff is snapshotted at launch and never refreshed (v1).
 
+use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::diff::{DiffLine, FileDiff, LineKind, Status};
+use crate::highlight;
 use crate::input::TextInput;
 use crate::jj::Target;
 use crate::model::{self, AnchorError, Annotation, Body, Kind};
@@ -74,6 +76,9 @@ pub struct App {
     files: Vec<FileDiff>,
     /// Content rows of each file (separators excluded), indexed by annotation.
     content: Vec<Vec<DiffLine>>,
+    /// Per file, highlighted spans keyed by index into `content`, computed
+    /// once at launch since the diff is snapshotted and never refreshed.
+    highlights: Vec<HashMap<usize, highlight::Spans>>,
     /// All rendered rows per file, separators included.
     rows: Vec<Vec<Row>>,
     annotations: Vec<Annotation>,
@@ -124,6 +129,7 @@ impl App {
                 rows
             })
             .collect();
+        let highlights = files.iter().map(highlight::file).collect();
         let cursors = rows.iter().map(|r| first_content_row(r)).collect();
         let empty_state = empty_state.or_else(|| {
             files
@@ -135,6 +141,7 @@ impl App {
             target,
             files,
             content,
+            highlights,
             rows,
             annotations: Vec::new(),
             empty_state,
@@ -933,24 +940,19 @@ impl App {
                         LineKind::Context => (" ", self.theme.dim_fg),
                     };
                     let mark = annotation.map(|a| a.kind().marker()).unwrap_or(" ");
-                    let text_style = if annotation.is_some_and(|a| a.kind() == Kind::Delete) {
-                        base.add_modifier(Modifier::CROSSED_OUT)
+                    // Deleting is a review action, so it outranks the syntax
+                    // colours and must survive them.
+                    let is_delete = annotation.is_some_and(|a| a.kind() == Kind::Delete);
+                    let strike = if is_delete {
+                        Modifier::CROSSED_OUT
                     } else {
-                        base
+                        Modifier::empty()
                     };
+                    let text_style = base.add_modifier(strike);
 
                     // 1 mark + 1 space + two 4-wide gutters + 1 space
                     // + 1 sign + 1 space
                     let text_width = width.saturating_sub(14);
-                    let mut text = line.text.clone();
-                    if line.text.chars().count() > text_width {
-                        text = line
-                            .text
-                            .chars()
-                            .take(text_width.saturating_sub(1))
-                            .collect();
-                        text.push('…');
-                    }
                     // Selection is signalled by weight as well as tint: a
                     // blended background alone is too subtle to read on some
                     // themes, and the tint can vanish against a light one.
@@ -959,7 +961,29 @@ impl App {
                     } else {
                         Modifier::empty()
                     };
-                    let spans = vec![
+                    // Syntax colours come from the theme and are dropped for a
+                    // truncated line, where the cut can land mid-token.
+                    let highlighted = self
+                        .highlights
+                        .get(self.file)
+                        .and_then(|h| h.get(li))
+                        .filter(|_| line.text.chars().count() <= text_width);
+                    let text_spans: Vec<Span> = match highlighted {
+                        Some(spans) => spans
+                            .iter()
+                            .map(|(text, style)| {
+                                Span::styled(
+                                    text.clone(),
+                                    base.patch(*style).add_modifier(emphasis | strike),
+                                )
+                            })
+                            .collect(),
+                        None => vec![Span::styled(
+                            truncate(&line.text, text_width),
+                            text_style.add_modifier(emphasis),
+                        )],
+                    };
+                    let mut spans = vec![
                         Span::styled(
                             format!("{mark} "),
                             base.fg(self.theme.comment_fg).add_modifier(emphasis),
@@ -984,8 +1008,8 @@ impl App {
                             })
                             .add_modifier(emphasis),
                         ),
-                        Span::styled(text, text_style.add_modifier(emphasis)),
                     ];
+                    spans.extend(text_spans);
 
                     // One background for the whole row, text and padding
                     // alike, so the band reaches the pane edge unbroken.

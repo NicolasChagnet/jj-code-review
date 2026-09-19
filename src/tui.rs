@@ -242,39 +242,37 @@ impl App {
         self.set_cursor(last_content_row(self.rows()));
     }
 
-    /// `]`: the next hunk start, crossing into the next file at the end.
+    /// `]`: the next hunk start, wrapping to the first hunk of this file.
     fn next_hunk(&mut self) {
         let rows = self.rows().to_vec();
         let cur = self.cursor();
-        if let Some(h) = (cur + 1..rows.len()).find(|&i| matches!(rows[i], Row::Hunk(_))) {
+        if last_content_row(&rows) != cur
+            && let Some(h) = (cur + 1..rows.len()).find(|&i| matches!(rows[i], Row::Hunk(_)))
+        {
             self.set_cursor(h + first_content_row(&rows[h..]));
-        } else if self.file + 1 < self.files.len() {
-            self.select_file(self.file + 1);
-            self.jump_to_first();
+            return;
         }
+        // Wrap around within this file.
+        self.jump_to_first();
     }
 
-    /// `[`: the previous hunk start, crossing into the previous file at the end.
+    /// `[`: the previous hunk start, wrapping to the last hunk of this file.
     fn prev_hunk(&mut self) {
         let rows = self.rows().to_vec();
         let cur = self.cursor();
-        if first_content_row(&rows) == cur {
-            // Already at the first hunk of this file: step into the previous one.
-            if self.file > 0 {
-                self.select_file(self.file - 1);
-                let rows = self.rows().to_vec();
-                match (0..rows.len())
-                    .rev()
-                    .find(|&i| matches!(rows[i], Row::Hunk(_)))
-                {
-                    Some(h) => self.set_cursor(h + first_content_row(&rows[h..])),
-                    None => self.jump_to_last(),
-                }
-            }
+        if first_content_row(&rows) != cur
+            && let Some(h) = (0..cur).rev().find(|&i| matches!(rows[i], Row::Hunk(_)))
+        {
+            self.set_cursor(h + first_content_row(&rows[h..]));
             return;
         }
-        if let Some(h) = (0..cur).rev().find(|&i| matches!(rows[i], Row::Hunk(_))) {
-            self.set_cursor(h + first_content_row(&rows[h..]));
+        // Wrap around to the start of this file's last hunk.
+        match (0..rows.len())
+            .rev()
+            .find(|&i| matches!(rows[i], Row::Hunk(_)))
+        {
+            Some(h) => self.set_cursor(h + first_content_row(&rows[h..])),
+            None => self.jump_to_last(),
         }
     }
 
@@ -980,7 +978,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("Tab / Shift+Tab   cycle Diff · Files · Comments"),
         Line::from("j k ↑ ↓           move (per pane)"),
         Line::from("PgUp PgDn g G     page / first / last"),
-        Line::from("] [               next / previous hunk"),
+        Line::from("] [               next / previous hunk (wraps in file)"),
         Line::from("n p               next / previous file"),
         Line::from("v                 visual selection (Esc cancels)"),
         Line::from("c                 comment on selection or line"),
@@ -1238,6 +1236,20 @@ diff --git a/b.txt b/b.txt
  seven
 ";
 
+    const MULTI_HUNK: &str = "\
+diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+@@ -10,2 +10,2 @@
+ ten
+-ELEVEN
++eleven
+";
+
     fn app_of(raw: &str) -> App {
         App::new(target(), parse(raw), None)
     }
@@ -1279,15 +1291,38 @@ diff --git a/b.txt b/b.txt
     }
 
     #[test]
-    fn hunk_keys_cross_file_boundaries() {
+    fn hunk_keys_stay_within_the_file() {
         let mut a = app_of(TWO_FILES);
         assert_eq!(a.file, 0);
+        let first = a.cursor();
         a.next_hunk();
-        assert_eq!(a.file, 1, "file 0 has no further hunk");
-        assert!(matches!(a.rows()[a.cursor()], Row::Line(_)));
+        assert_eq!(a.file, 0, "file 0 has one hunk, so this wraps");
+        assert_eq!(a.cursor(), first);
         a.prev_hunk();
         assert_eq!(a.file, 0);
         assert!(matches!(a.rows()[a.cursor()], Row::Line(_)));
+    }
+
+    #[test]
+    fn hunk_keys_walk_hunks_then_wrap() {
+        let mut a = app_of(MULTI_HUNK);
+        let first = a.cursor();
+        a.next_hunk();
+        let second = a.cursor();
+        assert!(second > first, "advanced to the second hunk");
+        assert_eq!(a.file, 0);
+        a.next_hunk();
+        assert_eq!(
+            a.cursor(),
+            first,
+            "past the last hunk it wraps to the first"
+        );
+        a.prev_hunk();
+        assert_eq!(
+            a.cursor(),
+            second,
+            "before the first hunk it wraps to the last"
+        );
     }
 
     #[test]

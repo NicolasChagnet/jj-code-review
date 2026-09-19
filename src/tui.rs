@@ -917,11 +917,6 @@ impl App {
                         LineKind::Del => ("-", Color::Red),
                         LineKind::Context => (" ", self.theme.dim_fg),
                     };
-                    let num = match line.kind {
-                        LineKind::Add => line.new_ln,
-                        LineKind::Del => line.old_ln,
-                        LineKind::Context => line.new_ln,
-                    };
                     let mark = annotation.map(|a| a.kind().marker()).unwrap_or(" ");
                     let text_style = if annotation.is_some_and(|a| a.kind() == Kind::Delete) {
                         base.add_modifier(Modifier::CROSSED_OUT)
@@ -929,8 +924,9 @@ impl App {
                         base
                     };
 
-                    // 1 mark + 1 space + 4 gutter + 1 space + 1 sign + 1 space
-                    let text_width = width.saturating_sub(9);
+                    // 1 mark + 1 space + two 4-wide gutters + 1 space
+                    // + 1 sign + 1 space
+                    let text_width = width.saturating_sub(14);
                     let mut text = line.text.clone();
                     if line.text.chars().count() > text_width {
                         text = line
@@ -953,8 +949,15 @@ impl App {
                             format!("{mark} "),
                             base.fg(self.theme.comment_fg).add_modifier(emphasis),
                         ),
+                        // Both gutters are always drawn: showing only the
+                        // side a row belongs to makes a replacement read as
+                        // two rows with repeated, out-of-order numbers.
                         Span::styled(
-                            format!("{:>4} ", num.unwrap_or(0)),
+                            format!("{:>4} ", number_or_blank(line.old_ln)),
+                            base.fg(self.theme.dim_fg).add_modifier(emphasis),
+                        ),
+                        Span::styled(
+                            format!("{:>4} ", number_or_blank(line.new_ln)),
                             base.fg(self.theme.dim_fg).add_modifier(emphasis),
                         ),
                         Span::styled(
@@ -1327,6 +1330,15 @@ fn truncate(text: &str, width: usize) -> String {
     let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// A gutter cell: the number, or blanks when the line does not exist on that
+/// side (an addition has no old line, a deletion no new one).
+fn number_or_blank(n: Option<u32>) -> String {
+    match n {
+        Some(n) => n.to_string(),
+        None => String::new(),
+    }
 }
 
 /// Pads a row to `width` so its background covers the whole line.
@@ -1921,6 +1933,92 @@ diff --git a/a.txt b/a.txt
         let raw = "diff --git a/x b/x\n";
         let a = app_of(raw);
         assert!(a.empty_state.is_some());
+    }
+
+    fn row_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn gutters_show_both_sides_so_a_replacement_does_not_repeat() {
+        // A modified file: two old lines replaced by two new ones, then a
+        // single-line replacement further down.
+        let raw = "\
+diff --git a/f.txt b/f.txt
+--- a/f.txt
++++ b/f.txt
+@@ -4,7 +4,7 @@
+ line 4
+-line 5
+-line 6
++CHANGED five
++CHANGED six
+ line 7
+ line 8
+ line 9
+";
+        let a = app_of(raw);
+        let (lines, _) = a.diff_lines(60);
+        let rendered: Vec<String> = lines.iter().map(row_text).collect();
+
+        // Context rows carry the same number on both sides.
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.starts_with("     4    4   line 4")),
+            "context row has both gutters:\n{}",
+            rendered.join("\n")
+        );
+        // A deletion leaves the new gutter blank, and vice versa.
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.starts_with("     5      - line 5")),
+            "deletion shows old number, blank new:\n{}",
+            rendered.join("\n")
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.starts_with("          5 + CHANGED five")),
+            "addition shows new number, blank old:\n{}",
+            rendered.join("\n")
+        );
+        // The old line 5 and the new line 5 are distinct rows, never one row
+        // claiming two different numbers.
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|l| l.contains("5 + CHANGED five"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn added_file_leaves_the_old_gutter_empty() {
+        let raw = "\
+diff --git a/n.txt b/n.txt
+new file mode 100644
+--- /dev/null
++++ b/n.txt
+@@ -0,0 +1,2 @@
++one
++two
+";
+        let a = app_of(raw);
+        let (lines, _) = a.diff_lines(60);
+        let rendered: Vec<String> = lines.iter().map(row_text).collect();
+        assert!(
+            rendered.iter().any(|l| l.starts_with("          1 + one")),
+            "no old-side numbers on an added file:\n{}",
+            rendered.join("\n")
+        );
     }
 
     #[test]

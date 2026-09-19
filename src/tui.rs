@@ -109,9 +109,17 @@ impl App {
             .iter()
             .map(|f| {
                 let mut rows = Vec::new();
+                // Row indices address the file's concatenated line list, so
+                // they must keep advancing across hunks: restarting at zero
+                // would render the first hunk's lines again.
+                let mut index = 0usize;
                 for hunk in &f.hunks {
                     rows.push(Row::Hunk(hunk.header.clone()));
-                    rows.extend((0..hunk.lines.len()).map(Row::Line));
+                    rows.extend((0..hunk.lines.len()).map(|_| {
+                        let line = Row::Line(index);
+                        index += 1;
+                        line
+                    }));
                 }
                 rows
             })
@@ -2037,6 +2045,97 @@ diff --git a/f.txt b/f.txt
                 .any(|s| s.content.contains('▸')),
             "and is marked so it stays findable"
         );
+    }
+
+    #[test]
+    fn later_hunks_do_not_repeat_the_first_hunks_lines() {
+        // Two hunks: row indices must keep advancing across the hunk boundary,
+        // otherwise the second hunk re-renders the first one's lines.
+        let raw = "\
+diff --git a/f.txt b/f.txt
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,4 @@
+ one
+-two
++TWO
++two and a half
+ three
+@@ -10,3 +11,3 @@
+ ten
+-eleven
++ELEVEN
+ twelve
+";
+        let mut a = app_of(raw);
+        a.jump_to_last();
+        let (lines, _) = a.diff_lines(60);
+        let rendered: Vec<String> = lines.iter().map(row_text).collect();
+        let body = rendered.join("\n");
+
+        // The first hunk's context lines must appear once each.
+        assert_eq!(
+            body.matches("one").count(),
+            1,
+            "first hunk's line repeated:\n{body}"
+        );
+        assert_eq!(body.matches("two and a half").count(), 1);
+        // The second hunk must show its own content, not a replay.
+        assert!(
+            body.contains("ELEVEN"),
+            "second hunk content missing:\n{body}"
+        );
+        assert_eq!(
+            body.matches("twelve").count(),
+            1,
+            "duplicated second hunk:\n{body}"
+        );
+        // And its numbers must be the header's, not the first hunk's.
+        assert!(
+            rendered.iter().any(|l| l.starts_with("    10   11   ten")),
+            "second hunk numbering wrong:\n{body}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.starts_with("         12 + ELEVEN")),
+            "second hunk addition numbering wrong:\n{body}"
+        );
+    }
+
+    #[test]
+    fn every_hunk_maps_to_its_own_lines() {
+        // For each hunk row, the line rendered must be the line the index
+        // points at, in file order.
+        let raw = "\
+diff --git a/f.txt b/f.txt
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+@@ -5,2 +5,2 @@
+ five
+-six
++SIX
+";
+        let mut a = app_of(raw);
+        a.jump_to_last();
+        let content = a.lines(0);
+        let (lines, _) = a.diff_lines(60);
+        let mut seen = Vec::new();
+        for row in a.rows() {
+            if let Row::Line(idx) = row {
+                seen.push(content[*idx].text.clone());
+            }
+        }
+        assert_eq!(
+            seen,
+            vec!["one", "two", "TWO", "five", "six", "SIX"],
+            "row indices must address the file's line list in order"
+        );
+        let _ = lines;
     }
 
     #[test]

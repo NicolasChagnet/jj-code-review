@@ -21,9 +21,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::diff::{DiffLine, FileDiff, LineKind, Status};
 use crate::input::TextInput;
@@ -206,7 +204,6 @@ impl App {
             .saturating_sub(1)
     }
 
-
     fn line_at_content(&self, li: usize) -> Option<&DiffLine> {
         self.lines(self.file).get(li)
     }
@@ -238,11 +235,11 @@ impl App {
     }
 
     fn jump_to_first(&mut self) {
-        self.set_cursor(first_content_row(&self.rows().to_vec()));
+        self.set_cursor(first_content_row(self.rows()));
     }
 
     fn jump_to_last(&mut self) {
-        self.set_cursor(last_content_row(&self.rows().to_vec()));
+        self.set_cursor(last_content_row(self.rows()));
     }
 
     /// `]`: the next hunk start, crossing into the next file at the end.
@@ -266,7 +263,10 @@ impl App {
             if self.file > 0 {
                 self.select_file(self.file - 1);
                 let rows = self.rows().to_vec();
-                match (0..rows.len()).rev().find(|&i| matches!(rows[i], Row::Hunk(_))) {
+                match (0..rows.len())
+                    .rev()
+                    .find(|&i| matches!(rows[i], Row::Hunk(_)))
+                {
                     Some(h) => self.set_cursor(h + first_content_row(&rows[h..])),
                     None => self.jump_to_last(),
                 }
@@ -338,7 +338,13 @@ impl App {
                 Body::Delete => String::new(),
             };
             let label = self.annotations[idx].label();
-            self.start_popup(kind, body, idx, None, format!("{} on {label}", kind_title(kind)));
+            self.start_popup(
+                kind,
+                body,
+                idx,
+                None,
+                format!("{} on {label}", kind_title(kind)),
+            );
             return;
         }
 
@@ -378,10 +384,7 @@ impl App {
     /// An existing annotation of `kind` covering exactly this content range.
     fn find_covering(&self, kind: Kind, cf: usize, ct: usize) -> Option<usize> {
         self.annotations.iter().position(|a| {
-            a.kind() == kind
-                && a.file == self.file
-                && a.anchor_row == cf
-                && a.max_row() == ct
+            a.kind() == kind && a.file == self.file && a.anchor_row == cf && a.max_row() == ct
         })
     }
 
@@ -464,7 +467,9 @@ impl App {
         };
         self.annotations.remove(idx);
         self.flash("Annotation deleted");
-        self.comment_cursor = self.comment_cursor.min(self.annotations.len().saturating_sub(1));
+        self.comment_cursor = self
+            .comment_cursor
+            .min(self.annotations.len().saturating_sub(1));
     }
 
     /// Annotation indexes in submit order, which is also the Comments order.
@@ -620,7 +625,9 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.next_file(),
             KeyCode::Char('k') | KeyCode::Up => self.prev_file(),
             KeyCode::Char('g') | KeyCode::Home => self.select_file(0),
-            KeyCode::Char('G') | KeyCode::End => self.select_file(self.files.len().saturating_sub(1)),
+            KeyCode::Char('G') | KeyCode::End => {
+                self.select_file(self.files.len().saturating_sub(1))
+            }
             KeyCode::Enter => self.focus = Focus::Diff,
             _ => {}
         }
@@ -650,8 +657,8 @@ impl App {
         let area = frame.area();
         let cols = Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(20)])
             .split(area);
-        let sidebar =
-            Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(cols[0]);
+        let sidebar = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(cols[0]);
         let body = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(cols[1]);
 
         self.draw_files(frame, sidebar[0]);
@@ -695,7 +702,10 @@ impl App {
                     ));
                 }
                 if d > 0 {
-                    spans.push(Span::styled(format!(" ✗{d}"), Style::default().fg(Color::Red)));
+                    spans.push(Span::styled(
+                        format!(" ✗{d}"),
+                        Style::default().fg(Color::Red),
+                    ));
                 }
                 ListItem::new(Line::from(spans))
             })
@@ -771,10 +781,7 @@ impl App {
         let (lines, cursor_line) = self.diff_lines(width);
         let height = inner.height as usize;
         let offset = cursor_line.saturating_sub(height.saturating_sub(1));
-        frame.render_widget(
-            Paragraph::new(lines).scroll((offset as u16, 0)),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), inner);
     }
 
     /// Renders the current file's diff; also returns the screen line holding
@@ -828,7 +835,11 @@ impl App {
                     let text_width = width.saturating_sub(9);
                     let mut text = line.text.clone();
                     if line.text.chars().count() > text_width {
-                        text = line.text.chars().take(text_width.saturating_sub(1)).collect();
+                        text = line
+                            .text
+                            .chars()
+                            .take(text_width.saturating_sub(1))
+                            .collect();
                         text.push('…');
                     }
                     let spans = vec![
@@ -1034,7 +1045,9 @@ fn annotation_at<'a>(
     li: usize,
     line: &DiffLine,
 ) -> Option<&'a Annotation> {
-    annotations.iter().find(|a| a.file == file && a.covers(li, line))
+    annotations
+        .iter()
+        .find(|a| a.file == file && a.covers(li, line))
 }
 
 fn status_letter(f: &FileDiff) -> &'static str {
@@ -1136,7 +1149,10 @@ fn annotation_rows(a: &Annotation, width: usize) -> Vec<Line<'static>> {
                 _ => "    ● ",
             };
             let mut out = vec![Line::from(Span::styled(
-                truncate(&format!("{head}{}", text.lines().next().unwrap_or("")), width),
+                truncate(
+                    &format!("{head}{}", text.lines().next().unwrap_or("")),
+                    width,
+                ),
                 style,
             ))];
             for extra in text.lines().skip(1) {
@@ -1497,10 +1513,18 @@ diff --git a/b.txt b/b.txt
         let (lines, cursor_line) = a.diff_lines(60);
         let rendered: String = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("● hello"), "comment header row:\n{rendered}");
+        assert!(
+            rendered.contains("● hello"),
+            "comment header row:\n{rendered}"
+        );
         assert!(rendered.contains("┃ there"), "continuation row");
         assert_eq!(cursor_line, 1, "cursor is on the first content row");
     }

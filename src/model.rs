@@ -11,11 +11,7 @@
 //! Edits and deletions only make sense on lines that survive into the result,
 //! so they are rejected on old-side ranges.
 
-use crate::diff::{FileDiff, LineKind, Line};
-
-pub mod kind {
-    pub const COMMENT: &str = "comment";
-}
+use crate::diff::{DiffLine, LineKind};
 
 /// Which side of the diff an annotation's line numbers refer to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,14 +53,6 @@ impl Kind {
             Kind::Delete => "✗",
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Kind::Comment => "comment",
-            Kind::Edit => "edit",
-            Kind::Delete => "delete",
-        }
-    }
 }
 
 /// Payload of an annotation: free text, replacement content, or nothing.
@@ -92,6 +80,8 @@ pub struct Annotation {
     pub file: usize,
     /// Index of the first anchored diff row (a row inside a hunk).
     pub anchor_row: usize,
+    /// Number of diff rows from `anchor_row` covered by the range.
+    pub row_count: usize,
     /// Line span on the reported [`Side`], 1-based and inclusive.
     pub side: Side,
     pub start: u32,
@@ -108,12 +98,14 @@ impl Annotation {
         self.body.kind()
     }
 
-    /// True when the annotation covers a diff row (used for rendering).
-    pub fn covers(&self, row: usize, line: &Line) -> bool {
-        if row < self.anchor_row {
-            return false;
-        }
-        if !self.rows_within(row) {
+    /// Content-row index one past the last row of the anchored range.
+    pub fn max_row(&self) -> usize {
+        self.anchor_row + self.row_count.saturating_sub(1)
+    }
+
+    /// True when this annotation covers the given content row and line.
+    pub fn covers(&self, row: usize, line: &DiffLine) -> bool {
+        if row < self.anchor_row || row > self.max_row() {
             return false;
         }
         match line.kind {
@@ -126,12 +118,6 @@ impl Annotation {
                 None => false,
             },
         }
-    }
-
-    /// Whether `row` can still be part of the anchored range: rows are
-    /// contiguous inside one hunk, so this only guards against another hunk.
-    fn rows_within(&self, _row: usize) -> bool {
-        true
     }
 
     /// Human label like `L12-14` or `removed L7`.
@@ -160,7 +146,7 @@ pub enum AnchorError {
 /// Builds an annotation from `rows[from..=to]`, or explains why it cannot.
 pub fn anchor(
     file: usize,
-    rows: &[Line],
+    rows: &[DiffLine],
     from: usize,
     to: usize,
     body: Body,
@@ -202,6 +188,7 @@ pub fn anchor(
     Ok(Annotation {
         file,
         anchor_row: from,
+        row_count: to - from + 1,
         side,
         start,
         end,
@@ -219,7 +206,7 @@ fn span(current: Option<(u32, u32)>, n: u32) -> (u32, u32) {
 }
 
 /// New-side content of an annotation's range, for prefilling an edit popup.
-pub fn new_side_content(rows: &[Line], from: usize, to: usize) -> String {
+pub fn new_side_content(rows: &[DiffLine], from: usize, to: usize) -> String {
     let mut out: Vec<&str> = Vec::new();
     for line in &rows[from.min(rows.len())..=to.min(rows.len().saturating_sub(1))] {
         if line.new_ln.is_some() {
@@ -243,31 +230,12 @@ pub fn annotated_files(annotations: &[Annotation]) -> Vec<usize> {
     files
 }
 
-/// Per-file annotation counts, for the sidebar badges. Index is file index.
-pub fn file_counts(
-    files: &[FileDiff],
-    annotations: &[Annotation],
-) -> Vec<(usize, usize, usize)> {
-    let mut counts = vec![(0usize, 0usize, 0usize); files.len()];
-    for a in annotations {
-        let Some(slot) = counts.get_mut(a.file) else {
-            continue;
-        };
-        match a.kind() {
-            Kind::Comment => slot.0 += 1,
-            Kind::Edit => slot.1 += 1,
-            Kind::Delete => slot.2 += 1,
-        }
-    }
-    counts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::diff;
 
-    fn rows(raw: &str) -> Vec<Line> {
+    fn rows(raw: &str) -> Vec<DiffLine> {
         let files = diff::parse(raw);
         let mut out = Vec::new();
         for h in &files[0].hunks {
@@ -350,10 +318,7 @@ index 1111111..2222222 100644
             anchor(0, &r, 2, 3, Body::Edit("x".into())),
             Err(AnchorError::OldSide)
         );
-        assert_eq!(
-            anchor(0, &r, 2, 3, Body::Delete),
-            Err(AnchorError::OldSide)
-        );
+        assert_eq!(anchor(0, &r, 2, 3, Body::Delete), Err(AnchorError::OldSide));
     }
 
     #[test]
@@ -412,7 +377,10 @@ diff --git a/a.txt b/a.txt
     #[test]
     fn new_side_content_collects_replacement_lines() {
         let r = rows(MODIFY);
-        assert_eq!(new_side_content(&r, 4, 6), "new twelve\nnew thirteen\nnew fourteen");
+        assert_eq!(
+            new_side_content(&r, 4, 6),
+            "new twelve\nnew thirteen\nnew fourteen"
+        );
         assert_eq!(new_side_content(&r, 0, 1), "context ten\ncontext eleven");
     }
 
@@ -422,6 +390,7 @@ diff --git a/a.txt b/a.txt
             Annotation {
                 file: 1,
                 anchor_row: 0,
+                row_count: 1,
                 side: Side::New,
                 start: 2,
                 end: 2,
@@ -432,6 +401,7 @@ diff --git a/a.txt b/a.txt
             Annotation {
                 file: 0,
                 anchor_row: 0,
+                row_count: 1,
                 side: Side::New,
                 start: 9,
                 end: 9,
@@ -442,6 +412,7 @@ diff --git a/a.txt b/a.txt
             Annotation {
                 file: 0,
                 anchor_row: 0,
+                row_count: 1,
                 side: Side::New,
                 start: 9,
                 end: 9,
@@ -458,16 +429,13 @@ diff --git a/a.txt b/a.txt
     }
 
     #[test]
-    fn counts_group_by_kind_per_file() {
-        let files = diff::parse(MODIFY);
+    fn annotated_files_lists_each_file_once() {
         let rows = rows(MODIFY);
         let annotations = vec![
             anchor(0, &rows, 6, 6, Body::Comment("a".into())).unwrap(),
             anchor(0, &rows, 5, 5, Body::Edit("b".into())).unwrap(),
             anchor(0, &rows, 5, 5, Body::Delete).unwrap(),
         ];
-        let counts = file_counts(&files, &annotations);
-        assert_eq!(counts, vec![(1, 1, 1)]);
         assert_eq!(annotated_files(&annotations), vec![0]);
     }
 

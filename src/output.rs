@@ -13,7 +13,7 @@ use crate::{diff, jj, model};
 pub fn render_text(
     target: &jj::Target,
     files: &[diff::FileDiff],
-    annotations: &mut Vec<model::Annotation>,
+    annotations: &mut [model::Annotation],
 ) -> String {
     model::submit_order(annotations);
 
@@ -147,7 +147,7 @@ struct JsonDeletion {
 pub fn render_json(
     target: &jj::Target,
     files: &[diff::FileDiff],
-    annotations: &mut Vec<model::Annotation>,
+    annotations: &mut [model::Annotation],
 ) -> String {
     model::submit_order(annotations);
 
@@ -249,6 +249,7 @@ mod tests {
         Annotation {
             file,
             anchor_row: 0,
+            row_count: (end - start) as usize + 1,
             side,
             start,
             end,
@@ -366,7 +367,8 @@ src/old.rs (renamed from src/older.rs)
             .collect();
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{out}");
         assert!(
-            out.contains("\nsrc/main.rs\n") && out.contains("\nsrc/old.rs (renamed from src/older.rs)\n"),
+            out.contains("\nsrc/main.rs\n")
+                && out.contains("\nsrc/old.rs (renamed from src/older.rs)\n"),
             "{out}"
         );
         assert!(out.ends_with("  removed L7 delete\n"), "{out}");
@@ -401,11 +403,14 @@ src/old.rs (renamed from src/older.rs)
         assert_eq!(files[0]["comments"][0]["end"], 14);
         assert_eq!(files[0]["comments"][0]["text"], "one");
         assert_eq!(files[0]["edits"][0]["content"], "line 1\nline 2");
-        assert_eq!(files[0]["deletions"][0], serde_json::json!({
-            "side": "new",
-            "start": 33,
-            "end": 35,
-        }));
+        assert_eq!(
+            files[0]["deletions"][0],
+            serde_json::json!({
+                "side": "new",
+                "start": 33,
+                "end": 35,
+            })
+        );
 
         assert_eq!(files[1]["path"], "src/old.rs");
         assert_eq!(files[1]["old_path"], "src/older.rs");

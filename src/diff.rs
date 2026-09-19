@@ -3,7 +3,7 @@
 //! A file entry starts at a `diff --git a/<old> b/<new>` header and runs until
 //! the next such header. Paths come from that header plus `rename from/to` and
 //! `copy from/to` lines; `---`/`+++` are only inspected for `/dev/null`.
-//! Hunk bodies record one [`Line`] per content line with explicit old/new
+//! Hunk bodies record one [`DiffLine`] per content line with explicit old/new
 //! numbers; the `\ No newline at end of file` marker is folded into the
 //! preceding line's `no_newline` flag rather than stored as a line of its own.
 //! Malformed and unrecognised lines are skipped, never fatal.
@@ -33,27 +33,6 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
 }
 
-impl FileDiff {
-    /// True when the file no longer exists on the new side.
-    pub fn is_deleted(&self) -> bool {
-        self.status == Status::Deleted
-    }
-
-    /// True when the file did not exist on the old side.
-    pub fn is_new_file(&self) -> bool {
-        self.status == Status::Added
-    }
-
-    /// Index of the first hunk containing a line on the new side, else `None`.
-    ///
-    /// Useful for scrolling a diff view to the first piece of added content.
-    pub fn first_changed_hunk(&self) -> Option<usize> {
-        self.hunks
-            .iter()
-            .position(|h| h.lines.iter().any(|l| l.new_ln.is_some()))
-    }
-}
-
 /// Role of a single body line within a hunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineKind {
@@ -66,7 +45,7 @@ pub enum LineKind {
 
 /// One body line, with its position on each side it exists on.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Line {
+pub struct DiffLine {
     pub kind: LineKind,
     /// Pre-image line number; `None` for additions.
     pub old_ln: Option<u32>,
@@ -87,24 +66,20 @@ pub struct Hunk {
     pub new_len: u32,
     /// The raw `@@ -a,b +c,d @@ optional heading` line.
     pub header: String,
-    pub lines: Vec<Line>,
+    pub lines: Vec<DiffLine>,
 }
 
 impl Hunk {
     /// Index of the first line in this hunk that exists on the new side.
+    #[cfg(test)]
     pub fn first_new_line(&self) -> Option<usize> {
         self.lines.iter().position(|l| l.new_ln.is_some())
     }
 
     /// Index of the first line in this hunk that exists on the old side.
-    /// Index of the first line in this hunk that exists on the old side.
+    #[cfg(test)]
     pub fn first_old_line(&self) -> Option<usize> {
         self.lines.iter().position(|l| l.old_ln.is_some())
-    }
-
-    /// True for the synthetic hunk describing a whole new file.
-    pub fn is_added_file(&self) -> bool {
-        self.old_start == 0 && self.old_len == 0
     }
 }
 
@@ -165,7 +140,7 @@ pub fn parse(raw: &str) -> Vec<FileDiff> {
         };
 
         let line_model = match marker {
-            "+" => Some(Line {
+            "+" => Some(DiffLine {
                 kind: LineKind::Add,
                 old_ln: None,
                 new_ln: Some(0),
@@ -175,21 +150,21 @@ pub fn parse(raw: &str) -> Vec<FileDiff> {
             // A `@@ ` line that did not open a hunk is body content whose text
             // happens to start with `@@`, i.e. a context line whose marker is
             // the space before `@@`.
-            "@" if text.starts_with("@ ") => Some(Line {
+            "@" if text.starts_with("@ ") => Some(DiffLine {
                 kind: LineKind::Context,
                 old_ln: Some(0),
                 new_ln: Some(0),
                 text: format!("@{text}"),
                 no_newline: false,
             }),
-            "-" => Some(Line {
+            "-" => Some(DiffLine {
                 kind: LineKind::Del,
                 old_ln: Some(0),
                 new_ln: None,
                 text: text.to_string(),
                 no_newline: false,
             }),
-            " " => Some(Line {
+            " " => Some(DiffLine {
                 kind: LineKind::Context,
                 old_ln: Some(0),
                 new_ln: Some(0),
@@ -303,6 +278,18 @@ fn parse_metadata(line: &str, file: &mut FileDiff) {
 }
 
 impl FileDiff {
+    /// True when the file no longer exists on the new side.
+    #[cfg(test)]
+    pub fn is_deleted(&self) -> bool {
+        self.status == Status::Deleted
+    }
+
+    /// Index of the first hunk holding any content, if there is one.
+    #[cfg(test)]
+    pub fn first_changed_hunk(&self) -> Option<usize> {
+        self.hunks.iter().position(|h| !h.lines.is_empty())
+    }
+
     /// Set the status, keeping the pre-image path only for rename/copy.
     fn set_status(&mut self, status: Status, old_path: Option<String>) {
         self.status = status;
@@ -452,7 +439,6 @@ Binary files a/logo.png and b/logo.png differ
         let files = parse(ADD);
         assert_eq!(files.len(), 1);
         let file = &files[0];
-        assert!(file.is_new_file());
         assert_eq!(file.status, Status::Added);
         assert_eq!(file.path, "src/new.rs");
         assert_eq!(file.hunks.len(), 1);
@@ -460,18 +446,18 @@ Binary files a/logo.png and b/logo.png differ
         let hunk = &file.hunks[0];
         assert_eq!((hunk.old_start, hunk.old_len), (0, 0));
         assert_eq!((hunk.new_start, hunk.new_len), (1, 2));
-        assert!(hunk.is_added_file());
+        assert_eq!(hunk.old_len, 0);
         assert_eq!(
             hunk.lines,
             vec![
-                Line {
+                DiffLine {
                     kind: LineKind::Add,
                     old_ln: None,
                     new_ln: Some(1),
                     text: "alpha".into(),
                     no_newline: false,
                 },
-                Line {
+                DiffLine {
                     kind: LineKind::Add,
                     old_ln: None,
                     new_ln: Some(2),
@@ -496,14 +482,14 @@ Binary files a/logo.png and b/logo.png differ
         assert_eq!(
             hunk.lines,
             vec![
-                Line {
+                DiffLine {
                     kind: LineKind::Del,
                     old_ln: Some(1),
                     new_ln: None,
                     text: "alpha".into(),
                     no_newline: false,
                 },
-                Line {
+                DiffLine {
                     kind: LineKind::Del,
                     old_ln: Some(2),
                     new_ln: None,
@@ -513,7 +499,7 @@ Binary files a/logo.png and b/logo.png differ
             ]
         );
         assert!(hunk.lines.iter().all(|l| l.new_ln.is_none()));
-        assert_eq!(file.first_changed_hunk(), None);
+        assert_eq!(file.first_changed_hunk(), Some(0), "hunks still hold lines");
     }
 
     #[test]

@@ -13,7 +13,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -69,20 +69,24 @@ impl TextInput {
         self.lines.join("\n")
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.lines.iter().all(|l| l.is_empty())
-    }
-
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
 
+    /// True when every line is empty.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.lines.iter().all(|l| l.is_empty())
+    }
+
     /// 0-based row index of the cursor.
+    #[cfg(test)]
     pub fn cursor_line(&self) -> usize {
         self.row
     }
 
     /// Byte offset of the cursor inside the current line.
+    #[cfg(test)]
     pub fn cursor_col(&self) -> usize {
         self.col
     }
@@ -155,16 +159,6 @@ impl TextInput {
         let start = word_start(&line, self.col);
         self.lines[self.row].replace_range(start..self.col, "");
         self.col = start;
-    }
-
-    /// Delete whitespace then one word after the cursor.
-    pub fn delete_word_after(&mut self) {
-        let line = self.lines[self.row].clone();
-        if self.col >= line.len() {
-            return;
-        }
-        let end = word_end(&line, self.col);
-        self.lines[self.row].replace_range(self.col..end, "");
     }
 
     /// Ctrl-K: truncate the current line at the cursor.
@@ -252,9 +246,9 @@ impl TextInput {
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
         let alt = ev.modifiers.contains(KeyModifiers::ALT);
         match ev.code {
-            KeyCode::Char('c') if ctrl => return Handled::Ignored,
-            KeyCode::Esc => return Handled::Ignored,
-            KeyCode::Enter => return Handled::Ignored,
+            KeyCode::Char('c') if ctrl => Handled::Ignored,
+            KeyCode::Esc => Handled::Ignored,
+            KeyCode::Enter => Handled::Ignored,
 
             KeyCode::Char('j') if ctrl => {
                 self.insert_text("\n");
@@ -786,4 +780,3 @@ mod tests {
         assert_eq!(t.line_count(), 3);
     }
 }
-

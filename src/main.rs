@@ -148,11 +148,17 @@ fn review(args: &Args) -> Result<Option<String>, String> {
     let raw =
         jj::diff(&target.base.commit_id, &target.head.commit_id).map_err(|e| e.to_string())?;
     let files = diff::parse(&raw);
-    let empty_state = files
-        .is_empty()
-        .then(|| format!("No changes in {}..{}", target.base.short(), target.head.short()));
+    let empty_state = files.is_empty().then(|| {
+        format!(
+            "No changes in {}..{}",
+            target.base.short(),
+            target.head.short()
+        )
+    });
 
     let mut app = tui::App::new(target, files, empty_state);
+    // `ratatui::init` installs a panic hook that restores the terminal, which
+    // is what we want: a panic inside the TUI must not leave raw mode on.
     let mut terminal = ratatui::init();
     let outcome = tui::run(&mut terminal, &mut app);
     ratatui::restore();
@@ -206,7 +212,10 @@ mod tests {
     fn json_flag_is_recognised_anywhere() {
         assert!(run_args(&["--json"]).json);
         assert!(run_args(&["main", "--json"]).json);
-        assert_eq!(run_args(&["main", "--json"]).revset.as_deref(), Some("main"));
+        assert_eq!(
+            run_args(&["main", "--json"]).revset.as_deref(),
+            Some("main")
+        );
     }
 
     #[test]

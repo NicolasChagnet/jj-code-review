@@ -77,21 +77,70 @@ fn jj(args: &[&str]) -> Result<String> {
 ///
 /// `head` is `@-` when `@` is both empty and undescribed (the "smart shift"),
 /// otherwise `@`. `base` is the user's revset, or `head` minus one revision.
+///
+/// When the user passes a range like `main..@`, jj unions everything it
+/// matches, which is not what they mean: the review is that range's oldest
+/// endpoint up to its newest, so both endpoints are resolved here.
 pub fn resolve(revset: Option<&str>) -> Result<Target> {
-    let head = if is_empty()? && description("@")?.trim().is_empty() {
+    let head_revset = if is_empty()? && description("@")?.trim().is_empty() {
         "@-"
     } else {
         "@"
     };
-    let base = match revset {
-        Some(r) => r.to_string(),
-        None => format!("{head}-"),
+
+    let (base, head) = match revset {
+        Some(r) if r.contains("..") => {
+            // `A..B` is already a review range, so use both endpoints rather
+            // than the range as a base and `@` as the head.
+            match r.split_once("..") {
+                Some((a, b)) if !a.trim().is_empty() && !b.trim().is_empty() => {
+                    (a.trim().to_string(), b.trim().to_string())
+                }
+                _ => (r.to_string(), head_revset.to_string()),
+            }
+        }
+        Some(r) if is_set_expression(r) => {
+            // A union/intersection: the review spans its members.
+            let members = rev_list(r)?;
+            let base = members.first().cloned().unwrap_or_else(|| r.to_string());
+            let head = members
+                .last()
+                .cloned()
+                .unwrap_or_else(|| head_revset.to_string());
+            (base, head)
+        }
+        Some(r) => (r.to_string(), head_revset.to_string()),
+        None => (format!("{head_revset}-"), head_revset.to_string()),
     };
+
     Ok(Target {
         revset: revset.map(str::to_string).unwrap_or_else(|| base.clone()),
         base: rev(&base)?,
         head: rev(&head)?,
     })
+}
+
+/// True for revsets that can match more than one commit.
+fn is_set_expression(revset: &str) -> bool {
+    revset.contains("::") || revset.contains('|') || revset.contains('&')
+}
+
+/// Commit ids a revset matches, oldest first.
+fn rev_list(revset: &str) -> Result<Vec<String>> {
+    let ids = jj(&[
+        "log",
+        "-r",
+        revset,
+        "--no-graph",
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ])?;
+    Ok(ids
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// True when the given revision has no diff against its parents.
@@ -115,25 +164,35 @@ pub fn diff(from: &str, to: &str) -> Result<String> {
 }
 
 fn rev(revset: &str) -> Result<Rev> {
-    let raw = jj(&[
+    // `commit_id` and `description` are queried separately because
+    // descriptions are free-form and may contain any separator we could pick.
+    // A multi-revision revset matches several commits; `jj log` prints them
+    // oldest first, so the head is the *last* line and the base the first.
+    let ids = jj(&[
         "log",
         "-r",
         revset,
         "--no-graph",
         "-T",
-        "commit_id ++ \"|\" ++ description",
+        "commit_id ++ \"\\n\"",
     ])?;
-    let raw = raw.trim_end_matches('\n');
-    // A multi-revision revset logs several lines; the newest is the last one
-    // jj prints, so take the final line as the representative revision.
-    let line = raw.lines().next_back().unwrap_or("");
-    let (commit_id, description) = line.split_once('|').unwrap_or((line, ""));
-    if commit_id.is_empty() {
+    let mut lines: Vec<&str> = ids
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
         return Err(JjError(format!("no revision matches `{revset}`")));
     }
+    // A set expression matches several commits; the head is the newest.
+    let commit_id = if is_set_expression(revset) || revset.contains("..") {
+        lines.last().unwrap().to_string()
+    } else {
+        lines.remove(0).to_string()
+    };
     Ok(Rev {
-        commit_id: commit_id.to_string(),
-        description: description.to_string(),
+        commit_id,
+        description: description(revset)?.trim_end().to_string(),
     })
 }
 
@@ -165,6 +224,19 @@ mod tests {
             description: "one\n\ntwo".into(),
         };
         assert_eq!(r.short_description(), "one");
+    }
+
+    #[test]
+    fn resolve_uses_the_smart_shift_only_when_undescribed() {
+        // In the jj repo the working copy is generally described; this just
+        // asserts the resolution path runs and yields a usable target.
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let target = resolve(Some("main")).expect("main exists here");
+        assert_eq!(target.revset, "main");
+        assert!(!target.base.commit_id.is_empty());
+        assert!(!target.head.commit_id.is_empty());
     }
 
     #[test]

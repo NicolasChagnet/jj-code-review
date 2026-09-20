@@ -273,14 +273,19 @@ impl App {
         self.set_cursor(last_content_row(self.rows()));
     }
 
+    /// Row of the first content line following the header at `h`, if any.
+    fn first_line_after(rows: &[Row], h: usize) -> Option<usize> {
+        (h + 1..rows.len()).find(|&i| matches!(rows[i], Row::Line(_)))
+    }
+
     /// `]`: the next hunk start, wrapping to the first hunk of this file.
     fn next_hunk(&mut self) {
         let rows = self.rows().to_vec();
         let cur = self.cursor();
-        if last_content_row(&rows) != cur
-            && let Some(h) = (cur + 1..rows.len()).find(|&i| matches!(rows[i], Row::Hunk(_)))
+        if let Some(h) = (cur + 1..rows.len()).find(|&i| matches!(rows[i], Row::Hunk(_)))
+            && let Some(line) = Self::first_line_after(&rows, h)
         {
-            self.set_cursor(h + first_content_row(&rows[h..]));
+            self.set_cursor(line);
             return;
         }
         // Wrap around within this file.
@@ -291,18 +296,22 @@ impl App {
     fn prev_hunk(&mut self) {
         let rows = self.rows().to_vec();
         let cur = self.cursor();
-        if first_content_row(&rows) != cur
-            && let Some(h) = (0..cur).rev().find(|&i| matches!(rows[i], Row::Hunk(_)))
+        if cur > first_content_row(&rows)
+            && let Some(h) = (first_content_row(&rows)..cur)
+                .rev()
+                .find(|&i| matches!(rows[i], Row::Hunk(_)))
+            && let Some(line) = Self::first_line_after(&rows, h)
         {
-            self.set_cursor(h + first_content_row(&rows[h..]));
+            self.set_cursor(line);
             return;
         }
         // Wrap around to the start of this file's last hunk.
         match (0..rows.len())
             .rev()
             .find(|&i| matches!(rows[i], Row::Hunk(_)))
+            .and_then(|h| Self::first_line_after(&rows, h))
         {
-            Some(h) => self.set_cursor(h + first_content_row(&rows[h..])),
+            Some(line) => self.set_cursor(line),
             None => self.jump_to_last(),
         }
     }

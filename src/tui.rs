@@ -934,7 +934,7 @@ impl App {
     }
 
     fn draw_diff(&mut self, frame: &mut Frame, area: Rect) {
-        let block = pane_block(" Diff ", self.focus == Focus::Diff, &self.theme);
+        let block = self.diff_block(area.width as usize);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let width = inner.width as usize;
@@ -964,6 +964,31 @@ impl App {
             Paragraph::new(lines).scroll((self.scroll as u16, self.hscroll as u16)),
             inner,
         );
+    }
+
+    /// The diff pane's border, titled with the current file (and its previous
+    /// path, for renames and copies). The sidebar truncates long paths, so the
+    /// title is the only place the full one is shown.
+    fn diff_block(&self, width: usize) -> Block<'static> {
+        let Some(f) = self.files.get(self.file) else {
+            return pane_block(" Diff ", self.focus == Focus::Diff, &self.theme);
+        };
+        let path = match &f.old_path {
+            Some(old) if matches!(f.status, Status::Renamed | Status::Copied) => {
+                format!("{} ← {}", f.path, old)
+            }
+            _ => f.path.clone(),
+        };
+        let letter = status_letter(f);
+        let room = width.saturating_sub(9 + letter.chars().count());
+        let mut title = Vec::with_capacity(3);
+        title.push(Span::styled(
+            format!(" {letter} "),
+            Style::default().fg(status_color(f)),
+        ));
+        title.push(Span::raw(truncate(&path, room)));
+        title.push(Span::raw(" "));
+        pane_block(" Diff ", self.focus == Focus::Diff, &self.theme).title(Line::from(title))
     }
 
     /// Renders the current file's diff; also returns the screen line holding

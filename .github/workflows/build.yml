@@ -10,10 +10,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # Needed by the "Attach to release" step, which creates the GitHub release
+    # for the tag. Without it GITHUB_TOKEN cannot touch releases (403).
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:

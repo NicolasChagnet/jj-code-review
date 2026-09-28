@@ -33,6 +33,11 @@ use crate::theme::Theme;
 
 const SIDEBAR_WIDTH: u16 = 28;
 const PAGE: usize = 20;
+/// Columns panned per press of `h`/`l`.
+const HSTEP: usize = 16;
+/// Gutter columns (mark, space, two 4-wide gutters with spaces, sign, space)
+/// ahead of a diff line's text.
+const GUTTER: usize = 14;
 
 /// Which pane receives keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +98,13 @@ pub struct App {
     /// derived from the cursor so scrolling is minimal: the view only moves
     /// when the cursor would leave it, not on every cursor move.
     scroll: usize,
+    /// First visible column of the diff pane, so long lines can be panned
+    /// past the right edge instead of being cut off.
+    hscroll: usize,
     /// Diff pane height from the last draw, needed to clamp scrolling.
     view_height: usize,
+    /// Diff pane width from the last draw, needed to clamp hscroll.
+    view_width: usize,
     comment_cursor: usize,
     vstart: Option<usize>,
     popup: Option<Popup>,
@@ -155,7 +165,9 @@ impl App {
             file: 0,
             cursors,
             scroll: 0,
+            hscroll: 0,
             view_height: 0,
+            view_width: 0,
             comment_cursor: 0,
             vstart: None,
             popup: None,
@@ -323,6 +335,7 @@ impl App {
         if file != self.file {
             // The offset indexes the previous file's rows.
             self.scroll = 0;
+            self.hscroll = 0;
         }
         self.file = file;
         self.vstart = None;
@@ -723,8 +736,37 @@ impl App {
             KeyCode::PageUp => self.move_cursor(-(PAGE as isize)),
             KeyCode::Char('g') | KeyCode::Home => self.jump_to_first(),
             KeyCode::Char('G') | KeyCode::End => self.jump_to_last(),
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.hscroll = self.hscroll.saturating_sub(HSTEP);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.hscroll = (self.hscroll + HSTEP).min(self.hscroll_max());
+            }
             _ => {}
         }
+    }
+
+    /// The largest horizontal offset that still shows content: the longest
+    /// rendered line minus the pane width, so paging right past the end of
+    /// every line is a no-op instead of dragging the view into blank space.
+    fn hscroll_max(&self) -> usize {
+        if self.view_width == 0 {
+            return 0;
+        }
+        self.rows
+            .get(self.file)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| match row {
+                        Row::Line(li) => self.line_at_content(*li),
+                        Row::Hunk(_) => None,
+                    })
+                    .map(|l| l.text.chars().count() + GUTTER)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+            .saturating_sub(self.view_width)
     }
 
     fn files_key(&mut self, ev: KeyEvent) {
@@ -915,8 +957,13 @@ impl App {
         let (lines, cursor_line) = self.diff_lines(width);
         let height = inner.height as usize;
         self.view_height = height;
+        self.view_width = width;
         self.scroll = scroll_for(self.scroll, cursor_line, height, lines.len());
-        frame.render_widget(Paragraph::new(lines).scroll((self.scroll as u16, 0)), inner);
+        self.hscroll = self.hscroll.min(self.hscroll_max());
+        frame.render_widget(
+            Paragraph::new(lines).scroll((self.scroll as u16, self.hscroll as u16)),
+            inner,
+        );
     }
 
     /// Renders the current file's diff; also returns the screen line holding
@@ -974,7 +1021,6 @@ impl App {
 
                     // 1 mark + 1 space + two 4-wide gutters + 1 space
                     // + 1 sign + 1 space
-                    let text_width = width.saturating_sub(14);
                     // Selection is signalled by weight as well as tint: a
                     // blended background alone is too subtle to read on some
                     // themes, and the tint can vanish against a light one.
@@ -983,28 +1029,25 @@ impl App {
                     } else {
                         Modifier::empty()
                     };
-                    // Syntax colours come from the theme and are dropped for a
-                    // truncated line, where the cut can land mid-token.
-                    let highlighted = self
-                        .highlights
-                        .get(self.file)
-                        .and_then(|h| h.get(li))
-                        .filter(|_| line.text.chars().count() <= text_width);
-                    let text_spans: Vec<Span> = match highlighted {
-                        Some(spans) => spans
-                            .iter()
-                            .map(|(text, style)| {
-                                Span::styled(
-                                    text.clone(),
-                                    base.patch(*style).add_modifier(emphasis | strike),
-                                )
-                            })
-                            .collect(),
-                        None => vec![Span::styled(
-                            truncate(&line.text, text_width),
-                            text_style.add_modifier(emphasis),
-                        )],
-                    };
+                    // Long lines are not truncated here: the pane clips them
+                    // at the right edge and `hscroll` pans across the rest,
+                    // so syntax colours can stay on unconditionally.
+                    let text_spans: Vec<Span> =
+                        match self.highlights.get(self.file).and_then(|h| h.get(li)) {
+                            Some(spans) => spans
+                                .iter()
+                                .map(|(text, style)| {
+                                    Span::styled(
+                                        text.clone(),
+                                        base.patch(*style).add_modifier(emphasis | strike),
+                                    )
+                                })
+                                .collect(),
+                            None => vec![Span::styled(
+                                line.text.clone(),
+                                text_style.add_modifier(emphasis),
+                            )],
+                        };
                     let mut spans = vec![
                         Span::styled(
                             format!("{mark} "),
@@ -1112,7 +1155,12 @@ impl App {
         }
         match self.focus {
             Focus::Diff => {
-                let mut hints = vec![("j/k", "line"), ("] / [", "hunk"), ("g/G", "top/end")];
+                let mut hints = vec![
+                    ("j/k", "line"),
+                    ("] / [", "hunk"),
+                    ("g/G", "top/end"),
+                    ("h/l", "scroll"),
+                ];
                 if self.selection().is_some() {
                     hints.push(("v", "cancel selection"));
                     hints.push(("c", "comment range"));
@@ -2044,6 +2092,75 @@ diff --git a/a.txt b/a.txt
         assert_eq!(scroll_for(0, 3, 10, 5), 0);
         // Walking past the end clamps so the last row stays at the bottom.
         assert_eq!(scroll_for(0, 99, 10, 100), 90);
+    }
+
+    #[test]
+    fn hscroll_panes_right_and_stops_at_the_longest_line() {
+        let mut a = tall_app();
+        a.view_width = 30;
+        // The longest content line in the fixture is "+line 60" (8 chars):
+        // shorter than the pane, so there is nothing to pan to.
+        assert_eq!(a.hscroll_max(), 0);
+
+        // Nothing to pan for this fixture: `l` is a no-op.
+        a.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(a.hscroll, 0);
+
+        // `h` never goes negative.
+        a.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(a.hscroll, 0);
+    }
+
+    #[test]
+    fn hscroll_moves_in_steps_and_resets_on_file_switch() {
+        // A fixture with lines far wider than the pane.
+        let body: String = (1..=3).map(|_| format!("+{}\n", "x".repeat(200))).collect();
+        let raw = format!(
+            "diff --git a/w.txt b/w.txt\n--- /dev/null\n+++ b/w.txt\n@@ -0,0 +1,3 @@\n{body}"
+        );
+        let mut a = app_of(&raw);
+        a.view_width = 40;
+        let max = a.hscroll_max();
+        assert_eq!(max, 200 + GUTTER - 40);
+
+        a.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(a.hscroll, HSTEP);
+        a.handle_key(key(KeyCode::Right));
+        assert_eq!(a.hscroll, 2 * HSTEP);
+        // Panning far past the end clamps to the last column of content.
+        for _ in 0..100 {
+            a.handle_key(key(KeyCode::Char('l')));
+        }
+        assert_eq!(a.hscroll, max);
+        // And back out, in steps.
+        a.handle_key(key(KeyCode::Left));
+        assert_eq!(a.hscroll, max - HSTEP);
+
+        // Switching files clears the horizontal offset with the vertical one.
+        let mut two_files = app_of(TWO_FILES);
+        two_files.view_width = 40;
+        // Seed an offset directly: this fixture's lines are too short to pan.
+        two_files.hscroll = HSTEP;
+        two_files.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(two_files.hscroll, 0);
+    }
+
+    #[test]
+    fn diff_lines_keep_the_full_text_of_long_lines() {
+        let raw = "diff --git a/w.txt b/w.txt\n--- /dev/null\n+++ b/w.txt\n@@ -0,0 +1 @@\n"
+            .to_string()
+            + &format!("+{}\n", "y".repeat(120));
+        let a = app_of(&raw);
+        let (lines, _) = a.diff_lines(40);
+        // Find the content row (hunk header is row 0, content is row 1+).
+        let line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("yyyy")))
+            .expect("the long line must be rendered");
+        // Gutter + full text, no truncation: total length must exceed the pane.
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains(&"y".repeat(120)));
+        assert_eq!(text.chars().count(), 120 + GUTTER);
     }
 
     #[test]

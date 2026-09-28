@@ -45,6 +45,7 @@ KEYS:
     j k ↑ ↓          move               ] [      next / previous hunk
     n p              next / prev file   g G      first / last
     v                visual selection   Enter    open file / goto comment
+    h l ← →          scroll long lines horizontally
     c                comment            e        suggested edit
     x                mark for deletion  d        clear / delete annotation
     ?                help               s        submit

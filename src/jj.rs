@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn missing_jj_is_reported() {
-        // Only meaningful when jj is absent; otherwise just assert it works.
+        // A missing `jj` must surface as a clear error, not a panic.
         let r = Command::new("jj").arg("--version").output();
-        assert!(r.is_ok(), "jj should be available for the manual checklist");
+        assert!(r.is_ok(), "jj should be installed for the test suite");
     }
 }

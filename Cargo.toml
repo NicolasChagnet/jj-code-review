@@ -20,3 +20,11 @@ two-face = { version = "0.5.2", features = ["syntect-default-onig"] }
 [[bin]]
 name = "jcr"
 path = "src/main.rs"
+
+# Our release archives are named after the binary (`jcr-<tag>-<target>.tar.gz`)
+# and contain a single top-level dir, neither of which cargo-binstall's default
+# heuristics can infer from the crate name `jj-code-review`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/jcr-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "jcr-v{ version }-{ target }/{ bin }{ binary-ext }"

@@ -37,6 +37,20 @@ impl Rev {
     }
 }
 
+/// Runs `jj <args>` in `dir`, with the same non-interactive flags as [`jj`].
+///
+/// Reviewing a checkout that is not the process's CWD is only used by tests,
+/// so this stays `cfg(test)` rather than widening the public surface.
+#[cfg(test)]
+fn jj_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new("jj")
+        .current_dir(dir)
+        .args(["--no-pager", "--color", "never"])
+        .args(args)
+        .output()
+        .expect("jj should be installed for the test suite")
+}
+
 #[derive(Debug)]
 pub struct JjError(pub String);
 
@@ -226,13 +240,42 @@ mod tests {
         assert_eq!(r.short_description(), "one");
     }
 
+    /// Creates a throwaway jj repo described as `described`, and returns its
+    /// path. The path is leaked on purpose: tests need it to outlive the guard
+    /// for the process's lifetime, and the OS temp dir cleans it up.
+    fn scratch_repo(described: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "jcr-jj-tests-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch repo");
+        let init = jj_in(&dir, &["git", "init"]);
+        assert!(init.status.success(), "jj git init failed: {init:?}");
+        // A fresh repo has no `main` bookmark; `resolve(Some("main"))` needs one.
+        let bookmark = jj_in(&dir, &["bookmark", "create", "main", "-r", "@"]);
+        assert!(
+            bookmark.status.success(),
+            "jj bookmark create failed: {bookmark:?}"
+        );
+        if described {
+            let desc = jj_in(&dir, &["describe", "-m", "test change"]);
+            assert!(desc.status.success(), "jj describe failed: {desc:?}");
+        }
+        dir
+    }
+
     #[test]
     fn resolve_uses_the_smart_shift_only_when_undescribed() {
-        // In the jj repo the working copy is generally described; this just
-        // asserts the resolution path runs and yields a usable target.
-        if Command::new("jj").arg("--version").output().is_err() {
-            return;
-        }
+        // `resolve` shells out to the *ambient* repo, so the check has to run
+        // from inside the repo. CI checks out with git and has no `.jj`, so
+        // relying on the working copy being a jj repo is not an option.
+        let dir = scratch_repo(true);
+        // Safety: `set_current_dir` is process-global; this test is the only
+        // one that mutates it and no other test shells out to jj.
+        std::env::set_current_dir(&dir).expect("enter scratch repo");
+
         let target = resolve(Some("main")).expect("main exists here");
         assert_eq!(target.revset, "main");
         assert!(!target.base.commit_id.is_empty());
